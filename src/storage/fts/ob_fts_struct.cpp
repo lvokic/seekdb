@@ -24,7 +24,28 @@ namespace oceanbase
 {
 namespace storage
 {
+void ObFTWord::calc_hash()
+{
+  sql::ObExprBasicFuncs *funcs = ObDatumFuncs::get_basic_func(meta_.get_type(), meta_.get_collation_type());
+  if (OB_LIKELY(nullptr != funcs && nullptr != funcs->default_hash_)) {
+    funcs->default_hash_(word_, 0, hash_val_);
+  } else {
+    hash_val_ = 0;
+  }
+}
 
+bool ObFTWord::inner_equal(const ObFTWord &other) const
+{
+  int ret = 0;
+  ObDatumCmpFuncType func = get_datum_cmp_func(meta_, other.meta_);
+  if (OB_LIKELY(func != nullptr)) {
+    if (OB_FAIL(func(word_, other.word_, ret))) {
+       return false;
+    }
+    return (ret == 0);
+  }
+  return common::ObDatum::binary_equal(word_, other.word_);
+}
 
 } // namespace storage
 } // namespace oceanbase

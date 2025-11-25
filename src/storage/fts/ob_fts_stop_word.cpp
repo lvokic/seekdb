@@ -55,8 +55,8 @@ ObAddWordT<WordMapT>::ObAddWordT(
         min_max_word_cnt_(0),
         non_stopword_cnt_(0),
         stopword_cnt_(0),
-        min_token_size_(property.min_ngram_token_size_),
-        max_token_size_(property.max_ngram_token_size_),
+        min_token_size_(property.min_token_size_),
+        max_token_size_(property.max_token_size_),
         flag_(flag)
 {
 }
@@ -106,6 +106,9 @@ int ObAddWordT<WordMapT>::process_word(
           if (OB_FAIL(groupby_word(tmp_word, word_freq))) {
             LOG_WARN("failed to groupby word", K(ret));
           }
+          if (OB_SUCC(ret)) {
+            non_stopword_cnt_ += word_freq;
+          }
         } else {
           non_stopword_cnt_ += word_freq;
         }
@@ -126,9 +129,12 @@ int ObAddWordT<WordMapT>::casedown_word(const char* src_ptr, int64_t src_len, ch
 {
   int ret = OB_SUCCESS;
   ObString src_str(src_len, src_len, const_cast<char*>(src_ptr));
-  ObString dst_str(src_len, src_len, dst_buf);
+  ObString dst_str;
   if (OB_FAIL(common::ObCharset::tolower(word_meta_.get_collation_type(), src_str, dst_str, allocator_))) {
-     // log
+    // log
+  } else {
+    int64_t copy_len = std::min(src_len, (int64_t)dst_str.length());
+    MEMCPY(dst_buf, dst_str.ptr(), copy_len);
   }
   return ret;
 }

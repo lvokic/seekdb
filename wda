@@ -16,10 +16,12 @@ SELECT
     id,
     fulltext_col,
     MATCH(fulltext_col) AGAINST('sample 1' IN NATURAL LANGUAGE MODE) AS text_score
-FROM Item
+FROM test_insert_en
 WHERE MATCH(fulltext_col) AGAINST('sample 1' IN NATURAL LANGUAGE MODE)
 ORDER BY text_score DESC
 LIMIT 2;
+
+explain SELECT * FROM test_insert_en WHERE MATCH(fulltext_col) AGAINST('OceanBaseSuperTestWord' IN NATURAL LANGUAGE MODE) limit 3;
 
 #!/bin/bash
 

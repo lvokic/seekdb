@@ -56,16 +56,12 @@ public:
       if (hash_val_ != other.hash_val_) {
           return false;
       }
-      return common::ObDatum::binary_equal(word_, other.word_);
+      return inner_equal(other);
   }
   OB_INLINE bool operator !=(const ObFTWord &other) const { return !(other == *this); }
-  OB_INLINE void calc_hash() {
-    if (word_.is_null()) {
-      hash_val_ = 0;
-    } else {
-      hash_val_ = common::murmurhash64A(word_.ptr_, word_.len_, 0);
-    }
-  }
+
+  void calc_hash();
+  bool inner_equal(const ObFTWord &other) const;
 
   TO_STRING_KV(K_(meta), K_(word), K_(hash_val));
 

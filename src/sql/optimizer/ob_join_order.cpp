@@ -19647,31 +19647,6 @@ int ObJoinOrder::get_query_tokens_by_boolean_mode(ObMatchFunRawExpr *match_expr,
   return ret;
 }
 
-template <typename T>
-class ObArenaNodeAllocer
-{
-public:
-  ObArenaNodeAllocer() : allocator_(nullptr) {}
-  
-  void *alloc() {
-    if (OB_LIKELY(NULL != allocator_)) {
-      return allocator_->alloc(sizeof(T));
-    }
-    return NULL;
-  }
-  
-  void free(void *ptr) { 
-    UNUSED(ptr); 
-  }
-  
-  void set_attr(const common::ObMemAttr &attr) { UNUSED(attr); }
-  
-  void set_allocator(common::ObIAllocator *allocator) { allocator_ = allocator; }
-
-private:
-  common::ObIAllocator *allocator_;
-};
-
 int ObJoinOrder::get_query_tokens(ObMatchFunRawExpr *match_expr,
                                   const ObTableSchema *index_schema,
                                   ObIArray<ObConstRawExpr*> &query_tokens)
