@@ -1,21 +1,12 @@
 /*
  * Copyright (c) 2025 OceanBase.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * ... License ...
  */
 
 #ifndef OB_FTS_PLUGIN_HELPER_H_
 #define OB_FTS_PLUGIN_HELPER_H_
+
+#define USING_LOG_PREFIX STORAGE_FTS
 
 #include "lib/allocator/ob_fifo_allocator.h"
 #include "lib/charset/ob_charset.h"
@@ -24,6 +15,9 @@
 #include "share/ob_plugin_helper.h"
 #include "storage/fts/ob_fts_parser_property.h"
 #include "storage/fts/ob_fts_struct.h"
+#include "share/ob_force_print_log.h"
+#include "plugin/interface/ob_plugin_ftparser_intf.h"
+#include "storage/fts/ob_fts_stop_word.h"
 
 namespace oceanbase
 {
@@ -43,7 +37,6 @@ namespace storage
 
 class ObStopWordChecker;
 class ObFTDictHub;
-class ObAddWord;
 
 #define FTS_BUILD_IN_PARSER_LIST                                                                   \
   FT_PARSER_TYPE(FTP_SPACE, space)                                                                 \
@@ -107,28 +100,19 @@ class ObFTParsePluginData final
 public:
   ObFTParsePluginData() = default;
   ~ObFTParsePluginData();
-
-  /**
-   * create a process global instance
-   */
   static int  init_global();
   static void deinit_global();
   static ObFTParsePluginData &instance();
-
   int init();
   void destroy();
-
-public:
   ObStopWordChecker *stop_word_checker() const { return stop_word_checker_; }
   int get_dict_hub(ObFTDictHub *&hub);
-
 private:
   int init_and_set_stopword_list();
   int init_dict_hub();
-
 private:
-  ObStopWordChecker *     stop_word_checker_ = nullptr;
-  ObFTDictHub *           dict_hub_          = nullptr;
+  ObStopWordChecker * stop_word_checker_ = nullptr;
+  ObFTDictHub * dict_hub_          = nullptr;
   common::ObFIFOAllocator handler_allocator_;
   bool                    is_inited_         = false;
 };
@@ -139,67 +123,29 @@ public:
   ObFTParseHelper();
   ~ObFTParseHelper();
 
-  /**
-   * initialize fulltext parse helper
-   *
-   * @param[in] allocator
-   * @param[in] parser_name, which consists of two parts name and version.
-   *                         e.g. default_parser.1
-   *                                   |         |
-   *                            parse name   paser version
-   * @param[in] parser_properties, which is a parser configuration in JSON format.
-   *                         e.g.  {
-   *                                 "min_token_size":2,
-   *                                 "max_token_size":84,
-   *                                 "ngram_token_size":2,
-   *                                 "stopword_table":"default",
-   *                                 "dict_table":"none",
-   *                                 "quanitfier_table":"none"
-   *                               }
-   *
-   * @return error code
-   */
   int init(
       common::ObIAllocator *allocator,
       const common::ObString &plugin_name,
       const common::ObString &plugin_properties);
-  /**
-   * Split document into multiple words
-   *
-   * @param[in] type, collation type for fulltext
-   * @param[in] fulltext
-   * @param[in] fulltext_len, length of the fulltext
-   * @param[out] doc_length, length of document by word count
-   * @param[out] words, word lists after segment
-   */
+
+  template <typename WordMapT>
   int segment(
       const common::ObObjMeta &meta,
       const char *fulltext,
       const int64_t fulltext_len,
       int64_t &doc_length,
-      ObFTWordMap &words) const;
+      WordMapT &words) const;
+
   int check_is_the_same(
       const common::ObString &plugin_name,
       const common::ObString &plugin_properties,
       bool &is_same) const;
-  /**
-   * Make json document for fulltext search
-   *
-   * @param[in] words, word lists after segment
-   * @param[in] doc_length, length of document by word count
-   * @param[out] json_root, json document
-   */
+
   int make_detail_json(
       const ObFTWordMap &words,
       const int64_t doc_length,
       common::ObIJsonBase *&json_root);
 
-  /**
-   * Make json document for fulltext search
-   *
-   * @param[in] words, word lists after segment
-   * @param[out] json_root, json document
-   */
   int make_token_array_json(
       const ObFTWordMap &words,
       common::ObIJsonBase *&json_root);
@@ -209,6 +155,7 @@ public:
   TO_STRING_KV(KP_(allocator), K_(parser_name), KP_(parser_desc), K_(is_inited));
 
 private:
+  template <typename AddWordT>
   static int segment(
       const ObFTParserProperty &property,
       const int64_t parser_version,
@@ -218,8 +165,10 @@ private:
       const char *fulltext,
       const int64_t fulltext_len,
       common::ObIAllocator &allocator,
-      ObAddWord &add_word);
+      AddWordT &add_word);
+
   int set_add_word_flag(const plugin::ObIFTParserDesc &ftparser_desc);
+
 private:
   common::ObIAllocator *allocator_;
   plugin::ObIFTParserDesc *parser_desc_;
@@ -234,6 +183,115 @@ private:
   static constexpr const char *ENTRY_NAME_TOKENS = "tokens";
   DISALLOW_COPY_AND_ASSIGN(ObFTParseHelper);
 };
+
+template <typename AddWordT>
+int ObFTParseHelper::segment(
+    const ObFTParserProperty &property,
+    const int64_t parser_version,
+    const plugin::ObIFTParserDesc *parser_desc,
+    plugin::ObPluginParam *plugin_param,
+    const ObCharsetInfo *cs,
+    const char *fulltext,
+    const int64_t fulltext_len,
+    common::ObIAllocator &allocator,
+    AddWordT &add_word)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(parser_version < 0 || nullptr == parser_desc || nullptr == cs || nullptr == fulltext || 0 >= fulltext_len)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid arguments", K(ret), K(parser_version), KP(parser_desc), KP(cs), K(fulltext), K(fulltext_len));
+  } else {
+    plugin::ObFTParserParam param;
+    plugin::ObITokenIterator *iter = nullptr;
+    param.allocator_ = &allocator;
+    param.cs_ = cs;
+    param.fulltext_ = fulltext;
+    param.ft_length_ = fulltext_len;
+    param.parser_version_ = parser_version;
+    param.plugin_param_ = plugin_param;
+    param.ngram_token_size_ = property.ngram_token_size_;
+    param.ik_param_.mode_
+        = (property.ik_mode_smart_ ? plugin::ObFTIKParam::Mode::SMART : plugin::ObFTIKParam::Mode::MAX_WORD);
+    param.min_ngram_size_ = property.min_ngram_token_size_;
+    param.max_ngram_size_ = property.max_ngram_token_size_;
+
+    if (OB_FAIL(parser_desc->segment(&param, iter))) {
+      LOG_WARN("fail to segment", K(ret), K(param));
+    } else if (OB_ISNULL(iter)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected error, token iterator is nullptr", K(ret), KP(iter));
+    } else {
+      const char *word = nullptr;
+      int64_t word_len = 0;
+      int64_t char_cnt = 0;
+      int64_t word_freq = 0;
+      while (OB_SUCC(ret)) {
+        if (OB_FAIL(iter->get_next_token(word, word_len, char_cnt, word_freq))) {
+          if (OB_ITER_END != ret) {
+            LOG_WARN("fail to get next token", K(ret), KPC(iter));
+          }
+        } else if (OB_FAIL(add_word.process_word(word, word_len, char_cnt, word_freq))) {
+          LOG_WARN("fail to process one word", K(ret), KP(word), K(word_len), K(char_cnt), K(word_freq));
+        }
+      }
+      if (OB_ITER_END == ret) {
+        ret = OB_SUCCESS;
+      }
+    }
+    if (OB_NOT_NULL(iter)) {
+      parser_desc->free_token_iter(&param, iter);
+      iter = nullptr;
+    }
+  }
+  return ret;
+}
+
+template <typename WordMapT>
+int ObFTParseHelper::segment(
+    const common::ObObjMeta &meta,
+    const char *fulltext,
+    const int64_t fulltext_len,
+    int64_t &doc_length,
+    WordMapT &words) const
+{
+  int ret = OB_SUCCESS;
+  const ObCharsetInfo *cs = nullptr;
+  ObCollationType type = meta.get_collation_type();
+  if (OB_UNLIKELY(!is_inited_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("this fulltext parser helper hasn't been initialized", K(ret), K(is_inited_));
+  } else if (OB_ISNULL(allocator_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("allocator ptr is nullptr", K(ret), KP_(allocator), K_(is_inited));
+  } else if (OB_UNLIKELY(CS_TYPE_INVALID == type || type >= CS_TYPE_PINYIN_BEGIN_MARK)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(ret), K(type));
+  } else if (OB_ISNULL(cs = common::ObCharset::get_charset(type))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected error, charset info is nullptr", K(ret), K(type));
+  } else {
+    words.reuse();
+    ObAddWordT<WordMapT> add_word(parser_property_, meta, add_word_flag_, *allocator_, words);
+    if (OB_FAIL(segment(
+                    parser_property_,
+                    parser_name_.get_parser_version(),
+                    parser_desc_,
+                    plugin_param_,
+                    cs,
+                    fulltext,
+                    fulltext_len,
+                    *allocator_,
+                    add_word))) {
+      LOG_WARN("fail to segment fulltext", K(ret), K(parser_name_), KP(parser_desc_), KP(cs), KP(fulltext),
+          K(fulltext_len), KP(allocator_), K(parser_property_));
+    } else {
+      doc_length = add_word.get_add_word_count();
+    }
+  }
+  LOG_DEBUG("ft parse segment", K(ret), K(type), K(add_word_flag_), K(parser_name_),
+      K(common::ObString(fulltext_len, fulltext)), K(words.size()));
+  return ret;
+}
 
 } // end namespace storage
 } // end namespace oceanbase

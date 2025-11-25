@@ -19647,6 +19647,31 @@ int ObJoinOrder::get_query_tokens_by_boolean_mode(ObMatchFunRawExpr *match_expr,
   return ret;
 }
 
+template <typename T>
+class ObArenaNodeAllocer
+{
+public:
+  ObArenaNodeAllocer() : allocator_(nullptr) {}
+  
+  void *alloc() {
+    if (OB_LIKELY(NULL != allocator_)) {
+      return allocator_->alloc(sizeof(T));
+    }
+    return NULL;
+  }
+  
+  void free(void *ptr) { 
+    UNUSED(ptr); 
+  }
+  
+  void set_attr(const common::ObMemAttr &attr) { UNUSED(attr); }
+  
+  void set_allocator(common::ObIAllocator *allocator) { allocator_ = allocator; }
+
+private:
+  common::ObIAllocator *allocator_;
+};
+
 int ObJoinOrder::get_query_tokens(ObMatchFunRawExpr *match_expr,
                                   const ObTableSchema *index_schema,
                                   ObIArray<ObConstRawExpr*> &query_tokens)
@@ -19678,14 +19703,15 @@ int ObJoinOrder::get_query_tokens(ObMatchFunRawExpr *match_expr,
     const ObObjMeta &key_meta = match_expr->get_search_key()->get_result_meta();
     storage::ObFTParseHelper tokenize_helper;
     common::ObSEArray<ObFTWord, 16> tokens;
-    hash::ObHashMap<ObFTWord, int64_t> token_map;
+    storage::ObFTSArenaWordMap token_map;
+    token_map.get_local_allocer().set_allocator(allocator_);
     int64_t doc_length = 0;
     const int64_t ft_word_bkt_cnt = MAX(search_text_string.length() / 10, 2);
     if (search_text_string.length() == 0) {
       // do nothing
     } else if (OB_FAIL(tokenize_helper.init(allocator_, parser_name, parser_properties))) {
       LOG_WARN("failed to init tokenize helper", K(ret));
-    } else if (OB_FAIL(token_map.create(ft_word_bkt_cnt, common::ObMemAttr(MTL_ID(), "FTWordMap")))) {
+    } else if (OB_FAIL(token_map.create(ft_word_bkt_cnt, "FTWordMap"))) {
       LOG_WARN("failed to create token map", K(ret));
     } else if (OB_FAIL(tokenize_helper.segment(
                            key_meta,
@@ -19695,7 +19721,7 @@ int ObJoinOrder::get_query_tokens(ObMatchFunRawExpr *match_expr,
                            token_map))) {
       LOG_WARN("failed to segment");
     } else {
-      for (hash::ObHashMap<ObFTWord, int64_t>::const_iterator iter = token_map.begin();
+      for (auto iter = token_map.begin();
           OB_SUCC(ret) && iter != token_map.end();
           ++iter) {
         const ObFTWord &token = iter->first;

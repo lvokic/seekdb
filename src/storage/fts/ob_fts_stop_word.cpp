@@ -22,12 +22,149 @@
 #include "storage/fts/ob_fts_stop_word.h"
 #include "storage/fts/ob_fts_plugin_helper.h"
 #include "storage/fts/ob_fts_parser_property.h"
-#include "storage/fts/ob_fts_plugin_helper.h"
 
 namespace oceanbase
 {
 namespace storage
 {
+
+int get_global_stopword_check_result(const ObFTWord &word, bool &is_stopword, common::ObIAllocator *allocator)
+{
+  int ret = OB_SUCCESS;
+  ObStopWordChecker *stop_word_checker = ObFTParsePluginData::instance().stop_word_checker();
+  if (OB_ISNULL(stop_word_checker)) {
+    is_stopword = false; 
+  } else if (OB_FAIL(stop_word_checker->check_stopword(word, is_stopword, allocator))) {
+    LOG_WARN("fail to check stopword", K(ret));
+  }
+  return ret;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// ObAddWordT Implementation
+template <typename WordMapT>
+ObAddWordT<WordMapT>::ObAddWordT(
+      const ObFTParserProperty &property,
+      const ObObjMeta &meta,
+      const ObAddWordFlag &flag,
+      common::ObIAllocator &allocator,
+      WordMapT &word_map)
+      : word_meta_(meta),
+        allocator_(allocator),
+        word_map_(word_map),
+        min_max_word_cnt_(0),
+        non_stopword_cnt_(0),
+        stopword_cnt_(0),
+        min_token_size_(property.min_ngram_token_size_),
+        max_token_size_(property.max_ngram_token_size_),
+        flag_(flag)
+{
+}
+
+template <typename WordMapT>
+int ObAddWordT<WordMapT>::process_word(
+    const char *word,
+    const int64_t word_len,
+    const int64_t char_cnt,
+    const int64_t word_freq)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(word) || OB_UNLIKELY(word_len <= 0 || char_cnt <= 0 || word_freq <= 0)) {
+    // invalid input, skip
+  } else if (flag_.min_max_word() && !is_min_max_word(char_cnt)) {
+    min_max_word_cnt_ += word_freq;
+  } else {
+    const int64_t STACK_BUF_SIZE = 128;
+    char stack_buf[STACK_BUF_SIZE];
+    char *process_buf = nullptr;
+    if (OB_LIKELY(word_len <= STACK_BUF_SIZE)) {
+      process_buf = stack_buf;
+    } else {
+      if (OB_ISNULL(process_buf = (char *)allocator_.alloc(word_len))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_WARN("failed to allocate memory", K(ret), K(word_len));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      if (flag_.casedown()) {
+        if (OB_FAIL(casedown_word(word, word_len, process_buf))) {
+          LOG_WARN("failed to casedown word", K(ret));
+        }
+      } else {
+        MEMCPY(process_buf, word, word_len);
+      }
+    }
+    if (OB_SUCC(ret)) {
+      ObFTWord tmp_word(word_len, process_buf, word_meta_);
+      bool is_stopword = false;
+      if (flag_.stopword() && OB_FAIL(check_stopword(tmp_word, is_stopword))) {
+        LOG_WARN("failed to check stopword", K(ret));
+      } else if (is_stopword) {
+        stopword_cnt_ += word_freq;
+      } else {
+        if (flag_.groupby_word()) {
+          if (OB_FAIL(groupby_word(tmp_word, word_freq))) {
+            LOG_WARN("failed to groupby word", K(ret));
+          }
+        } else {
+          non_stopword_cnt_ += word_freq;
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+template <typename WordMapT>
+bool ObAddWordT<WordMapT>::is_min_max_word(const int64_t c_len) const
+{
+  return (c_len >= min_token_size_ && c_len <= max_token_size_);
+}
+
+template <typename WordMapT>
+int ObAddWordT<WordMapT>::casedown_word(const char* src_ptr, int64_t src_len, char* dst_buf)
+{
+  int ret = OB_SUCCESS;
+  ObString src_str(src_len, src_len, const_cast<char*>(src_ptr));
+  ObString dst_str(src_len, src_len, dst_buf);
+  if (OB_FAIL(common::ObCharset::tolower(word_meta_.get_collation_type(), src_str, dst_str, allocator_))) {
+     // log
+  }
+  return ret;
+}
+
+template <typename WordMapT>
+int ObAddWordT<WordMapT>::check_stopword(const ObFTWord &word, bool &is_stopword)
+{
+  return get_global_stopword_check_result(word, is_stopword, &allocator_);
+}
+
+template <typename WordMapT>
+int ObAddWordT<WordMapT>::groupby_word(const ObFTWord &word, const int64_t word_cnt)
+{
+  int ret = OB_SUCCESS;
+  int64_t *cnt = nullptr;
+  if (OB_NOT_NULL(cnt = word_map_.get(word))) {
+    *cnt += word_cnt;
+  } else {
+    const ObString &str = word.get_word().get_string();
+    int64_t len = str.length();
+    char *persist_buf = nullptr;
+    if (OB_ISNULL(persist_buf = (char *)allocator_.alloc(len))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        STORAGE_LOG(WARN, "failed to alloc key memory", K(ret));
+    } else {
+        MEMCPY(persist_buf, str.ptr(), len);
+        uint64_t cached_hash;
+        word.hash(cached_hash);
+        ObFTWord persist_key(len, persist_buf, word_meta_, cached_hash);
+        if (OB_FAIL(word_map_.set_refactored(persist_key, word_cnt))) {
+            STORAGE_LOG(WARN, "failed to set word map", K(ret));
+        }
+    }
+  }
+  return ret;
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // class ObStopWordChecker
@@ -77,14 +214,10 @@ void ObStopWordChecker::destroy()
   }
 }
 
-int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
+int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword, common::ObIAllocator *allocator)
 {
   int ret = OB_SUCCESS;
-  uint64_t tenant_id = MTL_ID();
-  if (OB_INVALID_TENANT_ID == tenant_id) {
-    tenant_id = OB_SERVER_TENANT_ID;
-  }
-  common::ObArenaAllocator allocator(lib::ObMemAttr(tenant_id, "ChkStopWord"));
+  
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObStopWordChecker hasn't been initialized", K(ret), K(inited_));
@@ -92,159 +225,62 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("word is empty", K(ret), K(word));
   } else {
-    common::ObString cmp_str;
-    // do nothing set out with in if type is the same.
-    if (OB_FAIL(common::ObCharset::charset_convert(
-                                       allocator,
-                                       word.get_word().get_string(),
-                                       word.get_collation_type(),
-                                       stopword_type_.get_collation_type(),
-                                       cmp_str))) {
-      LOG_WARN("fail to convert charset", K(ret), K(word), K(stopword_type_));
-    } else {
-      ObFTWord converted(cmp_str.length(), cmp_str.ptr(), stopword_type_);
-      ret = stopword_set_.exist_refactored(converted);
-      if (OB_HASH_NOT_EXIST == ret) {
-        is_stopword = false;
-        ret = OB_SUCCESS;
-      } else if (OB_HASH_EXIST == ret) {
-        is_stopword = true;
-        ret = OB_SUCCESS;
-      } else if (OB_SUCC(ret)) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("the exist of hastset shouldn't return success", K(ret), K(word), K(converted));
-      } else {
-        LOG_WARN("fail to do exist", K(ret), K(word), K(converted));
-      }
+   if (word.get_collation_type() == stopword_type_.get_collation_type()) {
+        ret = stopword_set_.exist_refactored(word);
+        if (OB_HASH_NOT_EXIST == ret) { 
+            is_stopword = false; 
+            ret = OB_SUCCESS; 
+        } else if (OB_HASH_EXIST == ret) { 
+            is_stopword = true; 
+            ret = OB_SUCCESS; 
+        }
+        return ret;
+    }
+    common::ObIAllocator *calc_alloc = allocator;
+    common::ObArenaAllocator *tmp_alloc = nullptr;
+    if (OB_ISNULL(calc_alloc)) {
+        uint64_t tenant_id = MTL_ID();
+        if (OB_INVALID_TENANT_ID == tenant_id) tenant_id = OB_SERVER_TENANT_ID;
+        void *buf = ob_malloc(sizeof(common::ObArenaAllocator), "ChkStopWord");
+        if (buf) {
+            tmp_alloc = new(buf) common::ObArenaAllocator(lib::ObMemAttr(tenant_id, "ChkStopWord"));
+            calc_alloc = tmp_alloc;
+        } else {
+            ret = OB_ALLOCATE_MEMORY_FAILED;
+        }
+    }
+    if (OB_SUCC(ret)) {
+        common::ObString cmp_str;
+        if (OB_FAIL(common::ObCharset::charset_convert(
+                        *calc_alloc,
+                        word.get_word().get_string(),
+                        word.get_collation_type(),
+                        stopword_type_.get_collation_type(),
+                        cmp_str))) {
+            LOG_WARN("fail to convert charset", K(ret));
+        } else {
+            ObFTWord converted(cmp_str.length(), cmp_str.ptr(), stopword_type_);
+            ret = stopword_set_.exist_refactored(converted);
+            if (OB_HASH_NOT_EXIST == ret) {
+                is_stopword = false;
+                ret = OB_SUCCESS;
+            } else if (OB_HASH_EXIST == ret) {
+                is_stopword = true;
+                ret = OB_SUCCESS;
+            }
+        }
+    }
+    if (OB_NOT_NULL(tmp_alloc)) {
+        tmp_alloc->~ObArenaAllocator();
+        ob_free(tmp_alloc);
     }
   }
   return ret;
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// class ObAddWord
-ObAddWord::ObAddWord(
-    const ObFTParserProperty &property,
-    const ObObjMeta &meta,
-    const ObAddWordFlag &flag,
-    common::ObIAllocator &allocator,
-    ObFTWordMap &word_map)
-  : word_meta_(meta),
-    allocator_(allocator),
-    word_map_(word_map),
-    min_max_word_cnt_(0),
-    non_stopword_cnt_(0),
-    stopword_cnt_(0),
-    min_token_size_(property.min_token_size_),
-    max_token_size_(property.max_token_size_),
-    flag_(flag)
-{
-}
+template class ObAddWordT<ObFTWordMap>;
 
-int ObAddWord::process_word(
-    const char *word,
-    const int64_t word_len,
-    const int64_t char_cnt,
-    const int64_t word_freq)
-{
-  int ret = OB_SUCCESS;
-  bool is_stopword = false;
-  ObFTWord src_word(word_len, word, word_meta_);
-  ObFTWord dst_word;
-  if (OB_ISNULL(word) || OB_UNLIKELY(0 >= word_len || 0 >= char_cnt || 0 >= word_freq)) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid arguments", K(ret), KP(word), K(word_len), K(char_cnt), K(word_freq));
-  } else if (is_min_max_word(char_cnt)) {
-    ++min_max_word_cnt_;
-    LOG_DEBUG("skip too small or large word", K(ret), K(src_word), K(char_cnt));
-  } else if (OB_FAIL(casedown_word(src_word, dst_word))) {
-    LOG_WARN("fail to casedown word", K(ret), K(src_word));
-  } else if (OB_FAIL(check_stopword(dst_word, is_stopword))) {
-    LOG_WARN("fail to check stopword", K(ret), K(dst_word));
-  } else if (OB_UNLIKELY(is_stopword)) {
-    ++stopword_cnt_;
-    LOG_DEBUG("skip stopword", K(ret), K(dst_word));
-  } else if (OB_FAIL(groupby_word(dst_word, word_freq))) {
-    LOG_WARN("fail to groupby word into word map", K(ret), K(dst_word), K(word_freq));
-  } else {
-    non_stopword_cnt_ += word_freq;
-    LOG_DEBUG("add word", K(ret), KP(word), K(word_len), K(char_cnt), K(word_freq), K(src_word), K(dst_word));
-  }
-  return ret;
-}
-
-bool ObAddWord::is_min_max_word(const int64_t c_len) const
-{
-  return flag_.min_max_word() && (c_len < min_token_size_ || c_len > max_token_size_);
-}
-
-int ObAddWord::casedown_word(const ObFTWord &src, ObFTWord &dst)
-{
-  int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(src.empty())) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid src ft word", K(ret), K(src));
-  } else if (flag_.casedown()) {
-    ObString dst_str;
-    if (OB_FAIL(ObCharset::tolower(
-                    word_meta_.get_collation_type(),
-                    src.get_word().get_string(),
-                    dst_str,
-                    allocator_))) {
-      LOG_WARN("fail to tolower", K(ret), K(src), K(word_meta_));
-    } else {
-      ObFTWord tmp(dst_str.length(), dst_str.ptr(), word_meta_);
-      dst = tmp;
-    }
-  } else {
-    dst = src;
-  }
-  return ret;
-}
-
-int ObAddWord::check_stopword(const ObFTWord &ft_word, bool &is_stopword)
-{
-  int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(ft_word.empty())) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid arguments", K(ret), K(ft_word));
-  } else if (flag_.stopword()) {
-    ObStopWordChecker *stop_word_checker = ObFTParsePluginData::instance().stop_word_checker();
-    if (OB_ISNULL(stop_word_checker)) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("got null stop word checker", K(ret));
-    } else if (OB_FAIL(stop_word_checker->check_stopword(ft_word, is_stopword))) {
-      LOG_WARN("fail to check stopword", K(ret));
-    }
-  }
-  return ret;
-}
-
-int ObAddWord::groupby_word(const ObFTWord &word, const int64_t word_freq)
-{
-  int ret = OB_SUCCESS;
-  int64_t word_count = 0;
-  if (OB_UNLIKELY(word.empty() || word_freq <= 0)) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid arguments", K(ret), K(word), K(word_freq));
-  } else if (!flag_.groupby_word()) {
-    if (OB_FAIL(word_map_.set_refactored(word, 1/*word count*/))) {
-      LOG_WARN("fail to set fulltext word and count", K(ret), K(word));
-    }
-  } else if (OB_FAIL(word_map_.get_refactored(word, word_count)) && OB_HASH_NOT_EXIST != ret) {
-    LOG_WARN("fail to get fulltext word", K(ret), K(word));
-  } else {
-    if (OB_HASH_NOT_EXIST == ret) {
-      word_count = 1;
-    } else {
-      word_count += word_freq;
-    }
-    if (OB_FAIL(word_map_.set_refactored(word, word_count, 1/*overwrite*/))) {
-      LOG_WARN("fail to set fulltext word and count", K(ret), K(word), K(word_count));
-    }
-  }
-  return ret;
-}
+template class ObAddWordT<ObFTSArenaWordMap>;
 
 } // end namespace storage
 } // end namespace oceanbase

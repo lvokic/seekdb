@@ -1,0 +1,41 @@
+CREATE TABLE Item (
+        id BIGINT AUTO_INCREMENT,
+        base_id VARCHAR(255) NOT NULL,
+        docid_col VARCHAR(255) NOT NULL,
+        fulltext_col LONGTEXT
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO Item (base_id, docid_col, fulltext_col)
+    VALUES ('123', '214s', 'This is a sample fulltext content for testing purposes.'),
+           ('124', '215s', 'Another example of fulltext content to be indexed.'),
+           ('125', '216s', 'Fulltext search capabilities are important for many applications.');
+
+CREATE FULLTEXT INDEX idx_fulltext_col ON Item(fulltext_col);
+
+SELECT
+    id,
+    fulltext_col,
+    MATCH(fulltext_col) AGAINST('sample 1' IN NATURAL LANGUAGE MODE) AS text_score
+FROM Item
+WHERE MATCH(fulltext_col) AGAINST('sample 1' IN NATURAL LANGUAGE MODE)
+ORDER BY text_score DESC
+LIMIT 2;
+
+#!/bin/bash
+
+# Step 1: Start perf to collect data for 20 seconds
+echo "Starting perf to collect data..."
+perf record -F 99 -p 31691 -g -- sleep 20
+
+# Step 2: Extract the perf data to a script-readable format
+echo "Extracting perf data..."
+perf script > out.perf
+
+# Step 3: Generate flamegraph
+echo "Generating flamegraph..."
+git clone https://github.com/brendangregg/Flamegraph
+cd Flamegraph
+./stackcollapse-perf.pl ../out.perf > out.folded
+./flamegraph.pl out.folded > flamegraph.svg
+
+echo "Flamegraph has been generated: flamegraph.svg"

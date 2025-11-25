@@ -136,7 +136,7 @@ conda activate fulltext
 # 编译/部署集群
 
 ## 编译
-bash build.sh release -DOB_USE_CCACHE=ON --init --make -j3
+bash build.sh release -DOB_USE_CCACHE=ON --init --make -j6
 ## 部署
 ### 在 seekdb 目录下运行
 ./tools/deploy/obd.sh prepare -p /tmp/obtest
@@ -210,16 +210,16 @@ export JVM_PATH=$JAVA_HOME/lib/server/libjvm.so
 ```bash
 # 运行基础 mldr_benchmark 测试
 ## 测试时导入数据并构建索引
-python3.9 test_insert_fast.py --lang en
+python test_insert_fast.py --lang en
 ## 进行一组测试，获得平均查询时间
-python3.9 get_search_rrf_oceanbase.py --languages en
+python get_search_rrf_oceanbase.py --languages en
   --query_types bm25 --query_result_dave_dir ./query-results
 ## 计算召回率
-python3.9 evaluate_results_oceanbase.py --languages en
+python evaluate_results_oceanbase.py --languages en
   --metrics recall@10 --query_result_dave_dir ./query-results
 
 ## 一体化运行（一次预热 + 三次查询）
-python3.9 mldr_data_test.py --lang en --query_types bm25
+python mldr_data_test.py --lang en --query_types bm25
 ```
 
 注意：
@@ -1100,7 +1100,7 @@ seekdb 继承了 OceanBase 单机存储引擎、执行引擎、事务引擎、�
 # Clone the repository
 git clone https://github.com/oceanbase/seekdb.git
 cd seekdb
-bash build.sh debug --init --make
+bash build.sh debug -DOB_USE_CCACHE=ON --init --make -j6
 mkdir ~/seekdb
 mkdir ~/seekdb/bin
 cp build_debug/src/observer/observer ~/seekdb/bin

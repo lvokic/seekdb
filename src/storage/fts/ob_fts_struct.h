@@ -31,8 +31,15 @@ namespace storage
 class ObFTWord final
 {
 public:
-  ObFTWord() : word_(), meta_() {}
-  ObFTWord(const int64_t length, const char *ptr, const ObObjMeta &meta) : meta_(meta)
+  ObFTWord() : word_(), meta_(), hash_val_(0) {}
+  ObFTWord(const int64_t length, const char *ptr, const ObObjMeta &meta) 
+    : meta_(meta)
+  {
+    word_.set_string(ptr, length);
+    calc_hash();
+  }
+  ObFTWord(const int64_t length, const char *ptr, const ObObjMeta &meta, uint64_t hash_val) 
+    : meta_(meta), hash_val_(hash_val)
   {
     word_.set_string(ptr, length);
   }
@@ -41,18 +48,61 @@ public:
   OB_INLINE const ObDatum &get_word() const { return word_; }
   OB_INLINE ObCollationType get_collation_type() const { return meta_.get_collation_type(); }
   OB_INLINE bool empty() const { return word_.get_string().empty(); }
-  int hash(uint64_t &hash_val) const;
-  bool operator==(const ObFTWord &other) const;
+  OB_INLINE int hash(uint64_t &hash_val) const {
+      hash_val = hash_val_;
+      return common::OB_SUCCESS;
+  }
+  bool operator==(const ObFTWord &other) const {
+      if (hash_val_ != other.hash_val_) {
+          return false;
+      }
+      return common::ObDatum::binary_equal(word_, other.word_);
+  }
   OB_INLINE bool operator !=(const ObFTWord &other) const { return !(other == *this); }
+  OB_INLINE void calc_hash() {
+    if (word_.is_null()) {
+      hash_val_ = 0;
+    } else {
+      hash_val_ = common::murmurhash64A(word_.ptr_, word_.len_, 0);
+    }
+  }
 
-  TO_STRING_KV(K_(meta), K_(word));
+  TO_STRING_KV(K_(meta), K_(word), K_(hash_val));
 
 private:
   ObDatum word_;
   ObObjMeta meta_;
+  uint64_t hash_val_; // Hash 缓存
 };
 
 typedef common::hash::ObHashMap<ObFTWord, int64_t> ObFTWordMap;
+
+template <typename T>
+class ObArenaNodeAllocer
+{
+public:
+  ObArenaNodeAllocer() : allocator_(nullptr) {}
+  void *alloc() {
+    if (OB_LIKELY(NULL != allocator_)) {
+      return allocator_->alloc(sizeof(T));
+    }
+    return NULL;
+  }
+  void free(void *ptr) { /* Arena 不支持单点释放 */ }
+  void set_attr(const common::ObMemAttr &attr) { /* 忽略 */ }
+  void set_allocator(common::ObIAllocator *allocator) { allocator_ = allocator; }
+private:
+  common::ObIAllocator *allocator_;
+};
+
+typedef common::hash::ObHashMap<
+    ObFTWord, 
+    int64_t, 
+    common::hash::NoPthreadDefendMode, 
+    common::hash::hash_func<ObFTWord>,
+    common::hash::equal_to<ObFTWord>, 
+    ObArenaNodeAllocer<common::hash::HashMapPair<ObFTWord, int64_t>> 
+> ObFTSArenaWordMap;
 
 class ObAddWordFlag final
 {

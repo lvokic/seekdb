@@ -387,3 +387,12 @@ deps/3rd
 ############# test #############
 test/tmp
 test/var
+
+etc
+etc/**
+run
+run/**
+store
+stroe/**
+bin
+bin/**
