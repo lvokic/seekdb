@@ -806,7 +806,13 @@ int ObFtsIndexBuilderUtil::set_fts_index_table_columns(
                  "column name", fts_col_name, K(ret));
       } else if (OB_FAIL(tmp_column.assign(*fts_column))) {
         LOG_WARN("assign column schema failed", K(ret));
-      } else if (OB_FAIL(add_skip_index_for_index_column(tmp_column))) {
+      } else {
+        if (tmp_column.is_string_type()) {
+          tmp_column.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+          tmp_column.set_charset_type(ObCharset::charset_type_by_coll(CS_TYPE_UTF8MB4_BIN));
+        }
+      }
+      if (OB_FAIL(add_skip_index_for_index_column(tmp_column))) {
         LOG_WARN("add skip index for index column failed", K(ret));
       } else if (OB_FAIL(ObIndexBuilderUtil::add_column(&tmp_column,
                                                         true/*is_index_column*/,
@@ -1223,7 +1229,7 @@ int ObFtsIndexBuilderUtil::generate_word_segment_column(
         } else if (OB_FAIL(databuff_printf(ft_expr_def,
                                            OB_MAX_DEFAULT_VALUE_LENGTH,
                                            def_pos,
-                                           "`%s`, ",
+                                           "`%s` COLLATE utf8mb4_bin, ",
                                            col_schema->get_column_name()))) {
           LOG_WARN("print column name to buffer failed", K(ret));
         } else {
@@ -1263,8 +1269,13 @@ int ObFtsIndexBuilderUtil::generate_word_segment_column(
           column_schema.set_is_hidden(true);
           column_schema.set_data_type(ObVarcharType);
           column_schema.set_data_length(max_data_length); //The length of the generated column is consistent with the maximum length of the tokenized column
-          column_schema.set_collation_type(collation_type); // keep the collation of the generated column consistent with the collation of the tokenized column
-          column_schema.set_charset_type(charset_type);
+          if (ObCharset::is_valid_collation(CS_TYPE_UTF8MB4_BIN)) {
+              column_schema.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+              column_schema.set_charset_type(ObCharset::charset_type_by_coll(CS_TYPE_UTF8MB4_BIN));
+          } else {
+              column_schema.set_collation_type(collation_type);
+              column_schema.set_charset_type(charset_type);
+          }
           column_schema.set_prev_column_id(UINT64_MAX);
           column_schema.set_next_column_id(UINT64_MAX);
           if (OB_FAIL(column_schema.set_column_name(col_name_buf))) {

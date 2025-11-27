@@ -21,10 +21,26 @@ WHERE MATCH(fulltext_col) AGAINST('sample 1' IN NATURAL LANGUAGE MODE)
 ORDER BY text_score DESC
 LIMIT 2;
 
+SELECT 
+    docid_col, 
+    MATCH(fulltext_col) AGAINST('apple' IN NATURAL LANGUAGE MODE) AS text_score
+FROM test_insert_en
+WHERE MATCH(fulltext_col) AGAINST('apple' IN NATURAL LANGUAGE MODE)
+ORDER BY text_score DESC
+LIMIT 5;
+
+SELECT 
+    docid_col, 
+    MATCH(fulltext_col) AGAINST('banana' IN NATURAL LANGUAGE MODE) AS text_score
+FROM test_insert_en
+WHERE MATCH(fulltext_col) AGAINST('banana' IN NATURAL LANGUAGE MODE)
+ORDER BY text_score DESC
+LIMIT 5;
+
 explain SELECT * FROM test_insert_en WHERE MATCH(fulltext_col) AGAINST('OceanBaseSuperTestWord' IN NATURAL LANGUAGE MODE) limit 3;
 
 #!/bin/bash
-
+ 
 # Step 1: Start perf to collect data for 20 seconds
 echo "Starting perf to collect data..."
 perf record -F 99 -p 31691 -g -- sleep 20
@@ -41,3 +57,13 @@ cd Flamegraph
 ./flamegraph.pl out.folded > flamegraph.svg
 
 echo "Flamegraph has been generated: flamegraph.svg"
+
+kill -9 $(pidof observer)
+bash build.sh debug -DOB_USE_CCACHE=ON --init --make -j6
+cp build_debug/src/observer/observer ~/seekdb/bin
+
+./deps/3rd/u01/obclient/bin/obclient -h127.0.0.1 -P2881 -uroot -Dtest -A
+
+b ObIndexBuilderUtil::set_index_table_columns
+b ObFtsIndexBuilderUtil::set_fts_index_table_columns
+

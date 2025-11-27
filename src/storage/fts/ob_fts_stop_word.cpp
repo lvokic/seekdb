@@ -223,62 +223,27 @@ void ObStopWordChecker::destroy()
 int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword, common::ObIAllocator *allocator)
 {
   int ret = OB_SUCCESS;
-  
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObStopWordChecker hasn't been initialized", K(ret), K(inited_));
   } else if (OB_UNLIKELY(word.empty())) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("word is empty", K(ret), K(word));
+    // 空词直接返回 false，不做处理
   } else {
-   if (word.get_collation_type() == stopword_type_.get_collation_type()) {
-        ret = stopword_set_.exist_refactored(word);
-        if (OB_HASH_NOT_EXIST == ret) { 
-            is_stopword = false; 
-            ret = OB_SUCCESS; 
-        } else if (OB_HASH_EXIST == ret) { 
-            is_stopword = true; 
-            ret = OB_SUCCESS; 
+    ObObjMeta lookup_meta;
+    lookup_meta.set_varchar();
+    lookup_meta.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+    const ObDatum &datum = word.get_word();
+    ObFTWord lookup_key(datum.len_, datum.ptr_, lookup_meta);
+    int hash_ret = stopword_set_.exist_refactored(lookup_key);
+    if (hash_ret == OB_HASH_EXIST) {
+        is_stopword = true;
+    } else if (hash_ret == OB_HASH_NOT_EXIST) {
+        is_stopword = false;
+    } else {
+        ret = hash_ret;
+        if (ret != OB_HASH_NOT_EXIST) {
+             LOG_WARN("check exist in hash set failed", K(ret));
         }
-        return ret;
-    }
-    common::ObIAllocator *calc_alloc = allocator;
-    common::ObArenaAllocator *tmp_alloc = nullptr;
-    if (OB_ISNULL(calc_alloc)) {
-        uint64_t tenant_id = MTL_ID();
-        if (OB_INVALID_TENANT_ID == tenant_id) tenant_id = OB_SERVER_TENANT_ID;
-        void *buf = ob_malloc(sizeof(common::ObArenaAllocator), "ChkStopWord");
-        if (buf) {
-            tmp_alloc = new(buf) common::ObArenaAllocator(lib::ObMemAttr(tenant_id, "ChkStopWord"));
-            calc_alloc = tmp_alloc;
-        } else {
-            ret = OB_ALLOCATE_MEMORY_FAILED;
-        }
-    }
-    if (OB_SUCC(ret)) {
-        common::ObString cmp_str;
-        if (OB_FAIL(common::ObCharset::charset_convert(
-                        *calc_alloc,
-                        word.get_word().get_string(),
-                        word.get_collation_type(),
-                        stopword_type_.get_collation_type(),
-                        cmp_str))) {
-            LOG_WARN("fail to convert charset", K(ret));
-        } else {
-            ObFTWord converted(cmp_str.length(), cmp_str.ptr(), stopword_type_);
-            ret = stopword_set_.exist_refactored(converted);
-            if (OB_HASH_NOT_EXIST == ret) {
-                is_stopword = false;
-                ret = OB_SUCCESS;
-            } else if (OB_HASH_EXIST == ret) {
-                is_stopword = true;
-                ret = OB_SUCCESS;
-            }
-        }
-    }
-    if (OB_NOT_NULL(tmp_alloc)) {
-        tmp_alloc->~ObArenaAllocator();
-        ob_free(tmp_alloc);
     }
   }
   return ret;
