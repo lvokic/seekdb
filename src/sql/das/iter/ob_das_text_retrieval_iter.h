@@ -166,7 +166,7 @@ protected:
  
 protected:
   static const int64_t FWD_IDX_ROWKEY_COL_CNT = 2;
-  static const int64_t INV_IDX_ROWKEY_COL_CNT = 2;
+  static const int64_t INV_IDX_ROWKEY_COL_CNT = 3;
 protected:
   lib::MemoryContext mem_context_;
   ObArenaAllocator allocator_;

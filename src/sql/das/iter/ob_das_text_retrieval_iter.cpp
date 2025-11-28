@@ -19,6 +19,7 @@
 #include "ob_das_scan_iter.h"
 #include "sql/das/ob_das_ir_define.h"
 #include "sql/engine/expr/ob_expr_bm25.h"
+#include "share/ob_fts_index_builder_util.h"
 
 namespace oceanbase
 {
@@ -755,6 +756,10 @@ int ObDASTextRetrievalIter::gen_inv_idx_scan_range(const ObString &query_token, 
   tmp_obj.set_string(ObVarcharType, query_token);
   // We need to ensure collation type / level between query text and token column is compatible
   tmp_obj.set_meta_type(ir_ctdef_->search_text_->obj_meta_);
+  uint64_t hash_val = 0;
+  if (query_token.length() > 0) {
+    hash_val = common::murmurhash64A(query_token.ptr(), query_token.length(), 0);
+  }
 
   if (OB_ISNULL(buf = ctx_alloc.alloc(sizeof(ObObj) * obj_cnt))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
@@ -762,11 +767,12 @@ int ObDASTextRetrievalIter::gen_inv_idx_scan_range(const ObString &query_token, 
   } else if (OB_ISNULL(obj_ptr = new (buf) ObObj[obj_cnt])) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected nullptr", K(ret));
-  } else if (OB_FAIL(ob_write_obj(ctx_alloc, tmp_obj, obj_ptr[0]))) {
+  } else if (OB_FAIL(ob_write_obj(ctx_alloc, tmp_obj, obj_ptr[1]))) {
     LOG_WARN("failed to write obj", K(ret));
-  } else if (OB_FAIL(doc_id.get_datum().to_obj(obj_ptr[1], ir_ctdef_->inv_scan_domain_id_col_->obj_meta_))) {
+  } else if (OB_FAIL(doc_id.get_datum().to_obj(obj_ptr[2], ir_ctdef_->inv_scan_domain_id_col_->obj_meta_))) {
     LOG_WARN("failed to set obj", K(ret));
   } else {
+    obj_ptr[0].set_uint64(hash_val);
     ObRowkey row_key(obj_ptr, obj_cnt);
     common::ObTableID inv_table_id = ir_ctdef_->get_inv_idx_scan_ctdef()->ref_table_id_;
     if (OB_FAIL(scan_range.build_range(inv_table_id, row_key))) {

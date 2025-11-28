@@ -39,6 +39,8 @@ LIMIT 5;
 
 explain SELECT * FROM test_insert_en WHERE MATCH(fulltext_col) AGAINST('OceanBaseSuperTestWord' IN NATURAL LANGUAGE MODE) limit 3;
 
+explain SELECT * FROM item WHERE MATCH(fulltext_col) AGAINST('OceanBaseSuperTestWord' IN NATURAL LANGUAGE MODE) limit 3;
+
 #!/bin/bash
  
 # Step 1: Start perf to collect data for 20 seconds
@@ -64,6 +66,8 @@ cp build_debug/src/observer/observer ~/seekdb/bin
 
 ./deps/3rd/u01/obclient/bin/obclient -h127.0.0.1 -P2881 -uroot -Dtest -A
 
-b ObIndexBuilderUtil::set_index_table_columns
-b ObFtsIndexBuilderUtil::set_fts_index_table_columns
 
+DROP INDEX ft_fulltext ON test_insert_en;
+create fulltext index ft_fulltext on test_insert_en(fulltext_col);
+
+b ObDASTextRetrievalIter::gen_inv_idx_scan_range

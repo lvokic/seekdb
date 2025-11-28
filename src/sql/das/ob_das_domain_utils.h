@@ -23,6 +23,7 @@
 #include "sql/das/ob_das_dml_ctx_define.h"
 #include "storage/fts/ob_fts_doc_word_iterator.h"
 #include "storage/fts/ob_fts_plugin_helper.h"
+#include "share/ob_fts_index_builder_util.h"
 
 namespace oceanbase
 {
@@ -33,7 +34,7 @@ namespace sql
 class ObFTIndexRowCache final
 {
 public:
-  static ObObjDatumMapType FTS_INDEX_TYPES[4];
+  static ObObjDatumMapType FTS_INDEX_TYPES[share::ObFtsIndexBuilderUtil::OB_FTS_INDEX_TABLE_COLUMN_CNT];
   static ObObjDatumMapType FTS_DOC_WORD_TYPES[4];
   static ObExprOperatorType FTS_INDEX_EXPR_TYPE[4];
   static ObExprOperatorType FTS_DOC_WORD_EXPR_TYPE[4];
@@ -55,6 +56,8 @@ private:
   uint64_t row_idx_;
   bool is_fts_index_aux_;
   storage::ObFTParseHelper helper_;
+  storage::ObFTWordMap ft_word_map_;
+
   bool is_inited_;
 
   DISALLOW_COPY_AND_ASSIGN(ObFTIndexRowCache);
@@ -182,7 +185,8 @@ public:
                                          const ObDatum &doc_id_datum,
                                          const ObString &fulltext,
                                          const bool is_fts_index_aux,
-                                         ObDomainIndexRow &word_rows);
+                                         ObDomainIndexRow &word_rows,
+                                         storage::ObFTWordMap *word_map = nullptr);
   static int generate_multivalue_index_rows(
       ObIAllocator &allocator,
       const ObDASDMLBaseCtDef &das_ctdef,
@@ -372,6 +376,7 @@ private:
   const ObFTDocWordInfo *doc_word_info_;
   storage::ObFTDocWordScanIterator ft_doc_word_iter_;
   storage::ObFTParseHelper ft_parse_helper_;
+  storage::ObFTWordMap ft_word_map_;
   bool is_inited_;
 };
 

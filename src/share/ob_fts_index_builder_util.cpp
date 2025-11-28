@@ -28,6 +28,7 @@
 #include "rootserver/ob_root_service.h"
 #include "plugin/sys/ob_plugin_helper.h"
 #include "storage/fts/ob_fts_parser_property.h"
+#include "share/datum/ob_datum_funcs.h"
 
 namespace oceanbase
 {
@@ -786,6 +787,34 @@ int ObFtsIndexBuilderUtil::set_fts_index_table_columns(
         K(arg.index_columns_), K(arg.store_columns_));
   }
   HEAP_VAR(ObRowDesc, row_desc) {
+    ObColumnSchemaV2 hash_column;
+    const uint64_t next_column_id = std::max(index_schema.get_max_used_column_id() + 1,
+      static_cast<uint64_t>(common::OB_APP_MIN_COLUMN_ID));
+    hash_column.set_tenant_id(data_schema.get_tenant_id());
+    hash_column.set_table_id(index_schema.get_table_id());
+    hash_column.set_column_id(next_column_id);
+    hash_column.set_data_type(ObUInt64Type);
+    hash_column.set_collation_type(CS_TYPE_BINARY);
+    hash_column.set_data_length(static_cast<int32_t>(sizeof(uint64_t)));
+    hash_column.set_nullable(false);
+    const ObAccuracy &hash_accuracy = ObAccuracy::DDL_DEFAULT_ACCURACY2[ORACLE_MODE][ObUInt64Type];
+    hash_column.set_accuracy(hash_accuracy);
+    hash_column.set_is_hidden(false);
+    if (OB_FAIL(hash_column.set_column_name(ObString::make_string(FTS_TOKEN_HASH_COLUMN_NAME)))) {
+      LOG_WARN("failed to set token hash column name", K(ret));
+    } else if (OB_FAIL(ObIndexBuilderUtil::add_column(&hash_column,
+                                                   true,               // is_index_column
+                                                   true,               // is_rowkey (关键!)
+                                                   ObOrderType::ASC,   // 升序排列 (关键!)
+                                                   row_desc,
+                                                   index_schema,
+                                                   false,              // is_hidden
+                                                   false))) {          // is_specified_storing_col
+      LOG_WARN("failed to add fts hash column", K(ret));
+    } else {
+      index_schema.set_max_used_column_id(std::max(index_schema.get_max_used_column_id(), hash_column.get_column_id()));
+      LOG_INFO("Succeed to add FTS Hash Prefix Column");
+    }
     // 1. add word col, doc id col to fts index table
     for (int64_t i = 0; OB_SUCC(ret) && i < arg.index_columns_.count(); ++i) {
       const ObColumnSchemaV2 *fts_column = nullptr;

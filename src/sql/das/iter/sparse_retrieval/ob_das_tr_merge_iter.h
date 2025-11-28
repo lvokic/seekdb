@@ -150,7 +150,7 @@ private:
   int init_doc_length_est_param();
 private:
   static const int64_t FWD_IDX_ROWKEY_COL_CNT = 2;
-  static const int64_t INV_IDX_ROWKEY_COL_CNT = 2;
+  static const int64_t INV_IDX_ROWKEY_COL_CNT = 3;
 private:
   lib::MemoryContext mem_context_;  // clean after release or reuse
   common::ObArenaAllocator myself_allocator_; // clean after release

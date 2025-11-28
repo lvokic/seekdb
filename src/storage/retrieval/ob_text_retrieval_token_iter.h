@@ -107,7 +107,7 @@ private:
   static int set_decimal_int_by_precision(ObDatum &result_datum, const uint64_t decint, const ObPrecision precision);
 public:
   static const int64_t FWD_IDX_ROWKEY_COL_CNT = 2;
-  static const int64_t INV_IDX_ROWKEY_COL_CNT = 2;
+  static const int64_t INV_IDX_ROWKEY_COL_CNT = 3;
 private:
   lib::MemoryContext mem_context_;
   ObArenaAllocator *allocator_;
