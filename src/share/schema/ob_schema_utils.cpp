@@ -360,7 +360,13 @@ bool ObSchemaUtils::is_fulltext_column(const uint64_t flag)
   return is_doc_id_column(flag)
       || is_word_segment_column(flag)
       || is_word_count_column(flag)
-      || is_doc_length_column(flag);
+      || is_doc_length_column(flag)
+      || is_token_hash_column(flag);
+}
+
+bool ObSchemaUtils::is_token_hash_column(const uint64_t flag)
+{
+  return flag & GENERATED_FTS_TOKEN_HASH_COLUMN_FLAG;
 }
 
 bool ObSchemaUtils::is_doc_id_column(const uint64_t flag)

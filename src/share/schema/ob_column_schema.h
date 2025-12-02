@@ -297,6 +297,7 @@ int assign(const ObColumnSchemaV2 &src_schema);
 
   inline bool is_fulltext_column() const { return ObSchemaUtils::is_fulltext_column(column_flags_); }
   inline bool is_doc_id_column() const { return ObSchemaUtils::is_doc_id_column(column_flags_); }
+  inline bool is_token_hash_column() const { return ObSchemaUtils::is_token_hash_column(column_flags_); }
   inline bool is_word_segment_column() const { return ObSchemaUtils::is_word_segment_column(column_flags_); }
   inline bool is_word_count_column() const { return ObSchemaUtils::is_word_count_column(column_flags_); }
   inline bool is_doc_length_column() const { return ObSchemaUtils::is_doc_length_column(column_flags_); }

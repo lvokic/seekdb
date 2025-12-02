@@ -719,26 +719,32 @@ int ObDASTextRetrievalIter::gen_default_inv_idx_scan_range(const ObString &query
   tmp_obj.set_string(ObVarcharType, query_token);
   // We need to ensure collation type / level between query text and token column is compatible
   tmp_obj.set_meta_type(ir_ctdef_->search_text_->obj_meta_);
-
-  if (OB_ISNULL(buf = ctx_alloc.alloc(sizeof(ObObj) * obj_cnt))) {
+  uint64_t token_hash = 0;
+  if (OB_FAIL(share::ObFtsIndexBuilderUtil::calc_token_hash(ir_ctdef_->search_text_->obj_meta_,
+                                                            query_token,
+                                                            token_hash))) {
+    LOG_WARN("failed to calc token hash", K(ret), K(query_token));
+  } else if (OB_ISNULL(buf = ctx_alloc.alloc(sizeof(ObObj) * obj_cnt))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("failed to allocate memory for rowkey obj", K(ret));
   } else if (OB_ISNULL(obj_ptr = new (buf) ObObj[obj_cnt])) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected nullptr", K(ret));
-  } else if (OB_FAIL(ob_write_obj(ctx_alloc, tmp_obj, obj_ptr[0]))) {
+  } else if (OB_FAIL(ob_write_obj(ctx_alloc, tmp_obj, obj_ptr[1]))) {
     LOG_WARN("failed to write obj", K(ret));
-  } else if (OB_FAIL(ob_write_obj(ctx_alloc, tmp_obj, obj_ptr[2]))) {
+  } else if (OB_FAIL(ob_write_obj(ctx_alloc, tmp_obj, obj_ptr[4]))) {
     LOG_WARN("failed to write obj", K(ret));
   } else {
-    obj_ptr[1].set_min_value();
+    obj_ptr[0].set_min_value();
+    obj_ptr[2].set_min_value();
     obj_ptr[3].set_max_value();
+    obj_ptr[5].set_max_value();
     ObRowkey start_key(obj_ptr, INV_IDX_ROWKEY_COL_CNT);
-    ObRowkey end_key(&obj_ptr[2], INV_IDX_ROWKEY_COL_CNT);
+    ObRowkey end_key(&obj_ptr[3], INV_IDX_ROWKEY_COL_CNT);
     common::ObTableID inv_table_id = ir_ctdef_->get_inv_idx_scan_ctdef()->ref_table_id_;
     scan_range.table_id_ = inv_table_id;
     scan_range.start_key_.assign(obj_ptr, INV_IDX_ROWKEY_COL_CNT);
-    scan_range.end_key_.assign(&obj_ptr[2], INV_IDX_ROWKEY_COL_CNT);
+    scan_range.end_key_.assign(&obj_ptr[3], INV_IDX_ROWKEY_COL_CNT);
     scan_range.border_flag_.set_inclusive_start();
     scan_range.border_flag_.set_inclusive_end();
   }
@@ -756,12 +762,12 @@ int ObDASTextRetrievalIter::gen_inv_idx_scan_range(const ObString &query_token, 
   tmp_obj.set_string(ObVarcharType, query_token);
   // We need to ensure collation type / level between query text and token column is compatible
   tmp_obj.set_meta_type(ir_ctdef_->search_text_->obj_meta_);
-  uint64_t hash_val = 0;
-  if (query_token.length() > 0) {
-    hash_val = common::murmurhash64A(query_token.ptr(), query_token.length(), 0);
-  }
+  uint64_t token_hash = 0;
 
-  if (OB_ISNULL(buf = ctx_alloc.alloc(sizeof(ObObj) * obj_cnt))) {
+  if (OB_FAIL(share::ObFtsIndexBuilderUtil::calc_token_hash(
+          ir_ctdef_->search_text_->obj_meta_, query_token, token_hash))) {
+    LOG_WARN("failed to calc token hash", K(ret), K(query_token));
+  } else if (OB_ISNULL(buf = ctx_alloc.alloc(sizeof(ObObj) * obj_cnt))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("failed to allocate memory for rowkey obj", K(ret));
   } else if (OB_ISNULL(obj_ptr = new (buf) ObObj[obj_cnt])) {
@@ -772,7 +778,7 @@ int ObDASTextRetrievalIter::gen_inv_idx_scan_range(const ObString &query_token, 
   } else if (OB_FAIL(doc_id.get_datum().to_obj(obj_ptr[2], ir_ctdef_->inv_scan_domain_id_col_->obj_meta_))) {
     LOG_WARN("failed to set obj", K(ret));
   } else {
-    obj_ptr[0].set_uint64(hash_val);
+    obj_ptr[0].set_uint64(token_hash);
     ObRowkey row_key(obj_ptr, obj_cnt);
     common::ObTableID inv_table_id = ir_ctdef_->get_inv_idx_scan_ctdef()->ref_table_id_;
     if (OB_FAIL(scan_range.build_range(inv_table_id, row_key))) {

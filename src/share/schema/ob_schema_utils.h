@@ -102,6 +102,7 @@ public:
   static bool is_hybrid_vec_index_chunk_column(const uint64_t flag);
 
   static bool is_fulltext_column(const uint64_t flag);
+  static bool is_token_hash_column(const uint64_t flag);
   static bool is_doc_id_column(const uint64_t flag);
   static bool is_word_segment_column(const uint64_t flag);
   static bool is_word_count_column(const uint64_t flag);

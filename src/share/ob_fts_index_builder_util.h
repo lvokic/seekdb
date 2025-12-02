@@ -65,12 +65,11 @@ class ObFtsIndexBuilderUtil
 public:
   static constexpr const char *DOC_ROWKEY_NAME = "fts_doc_rowkey";
   static constexpr const char *ROWKEY_DOC_NAME = "fts_rowkey_doc";
-  static constexpr const char *FTS_TOKEN_HASH_COLUMN_NAME = "fts_token_hash";
-  static const int64_t OB_FTS_INDEX_TABLE_INDEX_COL_CNT = 2;
+  static constexpr const char *FTS_TOKEN_HASH_COLUMN_NAME = "__fts_token_hash";
+  static const int64_t OB_FTS_INDEX_TABLE_INDEX_COL_CNT = 3;
   static const int64_t OB_FTS_DOC_WORD_TABLE_INDEX_COL_CNT = 2;
   static const int64_t OB_FTS_INDEX_TABLE_COLUMN_CNT = 5;
   static const int64_t OB_FTS_DOC_WORD_TABLE_COLUMN_CNT = 4;
-  static const int64_t OB_FTS_INDEX_OR_DOC_WORD_TABLE_COL_CNT = 4;
 public:
   // Check if we can use rowkey instead of doc id.
   // if we want to add more types, make this one condition of them.
@@ -132,6 +131,9 @@ public:
       const obrpc::ObCreateIndexArg &arg,
       const share::schema::ObTableSchema &data_schema,
       share::schema::ObTableSchema &index_schema);
+  static int get_token_hash_col(
+      const ObTableSchema &data_schema,
+      const ObColumnSchemaV2 *&token_hash_col);
   static int get_doc_id_col(
       const ObTableSchema &data_schema,
       const ObColumnSchemaV2 *&doc_id_col);
@@ -188,6 +190,10 @@ public:
         const share::schema::ObIndexType index_type,
         const int64_t original_parallelism,
         int64_t &decided_parallelism);
+  static int calc_token_hash(
+      const common::ObObjMeta &token_meta,
+      const common::ObString &token,
+      uint64_t &hash_val);
 private:
   static int build_fts_aux_index_name(
     const ObIndexType type,
@@ -209,6 +215,13 @@ private:
       const ObIArray<const ObColumnSchemaV2 *> &fts_cols,
       const int index_column_cnt,
       ObIAllocator &allocator);
+  static int generate_token_hash_column(
+    const obrpc::ObCreateIndexArg *index_arg,
+    const uint64_t col_id,
+    ObTableSchema &data_schema, // not const since will add column to data schema
+    ObColumnSchemaV2 *&token_hash_col,
+    bool &is_new_col,
+    ObIAllocator &allocator);
   static int generate_word_segment_column(
       const obrpc::ObCreateIndexArg *index_arg,
       const uint64_t col_id,
@@ -271,6 +284,10 @@ private:
       ObIArray<const ObColumnSchemaV2 *> &cols,
       const ObColumnSchemaV2 *existing_col,
       ObColumnSchemaV2 *generated_col);
+  static int add_token_hash_rowkey_column(
+      const ObTableSchema &data_schema,
+      common::ObRowDesc &row_desc,
+      share::schema::ObTableSchema &index_schema);
   static int get_index_column_ids(
       const ObTableSchema &data_schema,
       const obrpc::ObCreateIndexArg &arg,

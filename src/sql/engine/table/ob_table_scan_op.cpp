@@ -4080,18 +4080,23 @@ int ObTableScanOp::fill_generated_fts_cols(blocksstable::ObDatumRow *row)
   int ret = OB_SUCCESS;
   const ObObjDatumMapType *types = MY_SPEC.is_fts_index_aux_ ? ObFTIndexRowCache::FTS_INDEX_TYPES : ObFTIndexRowCache::FTS_DOC_WORD_TYPES;
   const ObExprOperatorType *expr_types = MY_SPEC.is_fts_index_aux_ ? ObFTIndexRowCache::FTS_INDEX_EXPR_TYPE : ObFTIndexRowCache::FTS_DOC_WORD_EXPR_TYPE;
+  const int64_t storage_offset = MY_SPEC.is_fts_index_aux_ ? 1 : 0;
+  const int64_t storage_col_cnt = MY_SPEC.is_fts_index_aux_
+      ? share::ObFtsIndexBuilderUtil::OB_FTS_INDEX_TABLE_COLUMN_CNT
+      : share::ObFtsIndexBuilderUtil::OB_FTS_DOC_WORD_TABLE_COLUMN_CNT;
+  const int64_t output_cnt = storage_col_cnt - storage_offset;
   if (OB_ISNULL(row)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument, row is nullptr", K(ret), KP(row));
   } else {
-    for (int64_t i = 0; OB_SUCC(ret) && i < share::ObFtsIndexBuilderUtil::OB_FTS_INDEX_OR_DOC_WORD_TABLE_COL_CNT; ++i) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < output_cnt; ++i) {
       ObExpr *expr = nullptr;
       if (OB_FAIL(get_output_fts_col_expr_by_type(expr_types[i], expr))) {
         LOG_WARN("fail to get fts column expr", K(ret), K(i), K(expr_types[i]));
       } else {
         ObDatum &datum = expr->locate_datum_for_write(eval_ctx_);
         ObEvalInfo &eval_info = expr->get_eval_info(eval_ctx_);
-        if (OB_FAIL(datum.from_storage_datum(row->storage_datums_[i], types[i]))) {
+        if (OB_FAIL(datum.from_storage_datum(row->storage_datums_[i + storage_offset], types[i]))) {
           LOG_WARN("fail to fill fulltext index row", K(ret), K(i), K(MY_SPEC.output_), KPC(row));
         } else {
           eval_info.evaluated_ = true;

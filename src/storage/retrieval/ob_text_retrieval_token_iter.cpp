@@ -19,6 +19,7 @@
 #include "ob_text_retrieval_token_iter.h"
 #include "sql/engine/expr/ob_expr_bm25.h"
 #include "sql/das/iter/sparse_retrieval/ob_das_tr_merge_iter.h"
+#include "share/ob_fts_index_builder_util.h"
 
 namespace oceanbase
 {
@@ -455,33 +456,48 @@ int ObTextRetrievalTokenIter::advance_to(const ObDatum &id_datum)
   } else {
     ObRowkey start_rowkey = inv_idx_scan_param_->key_ranges_.at(0).start_key_;
     ObRowkey end_rowkey = inv_idx_scan_param_->key_ranges_.at(0).end_key_;
-    if (&start_rowkey.get_obj_ptr()[2] != &end_rowkey.get_obj_ptr()[0]) {
+    ObObj *start_objs = start_rowkey.get_obj_ptr();
+    ObObj *end_objs = end_rowkey.get_obj_ptr();
+    const bool function_lookup = (start_objs == end_objs);
+    if (OB_ISNULL(start_objs)) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("unexpected rowkey", K(ret), K(start_rowkey), K(end_rowkey));
+      LOG_WARN("unexpected null start rowkey", K(ret), K(start_rowkey));
+    } else if (OB_UNLIKELY(!function_lookup && OB_ISNULL(end_objs))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected null end rowkey", K(ret));
+    } else if (OB_UNLIKELY(!function_lookup
+               && start_objs + INV_IDX_ROWKEY_COL_CNT != end_objs)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected rowkey layout", K(ret), K(start_rowkey), K(end_rowkey));
+    } else if (OB_FAIL(advance_doc_id_.get_datum().to_obj(
+                   start_objs[INV_IDX_DOC_KEY_IDX], inv_scan_domain_id_col_->obj_meta_))) {
+      LOG_WARN("failed to set start doc id obj", K(ret));
+    } else if (!function_lookup &&
+               OB_FAIL(advance_doc_id_.get_datum().to_obj(
+                   end_objs[INV_IDX_DOC_KEY_IDX], inv_scan_domain_id_col_->obj_meta_))) {
+      LOG_WARN("failed to set end doc id obj", K(ret));
     }
-    // obj_ptr[0] is token, obj_ptr[1] is docid
-    ObObj *obj_ptr = start_rowkey.get_obj_ptr();
-    ObNewRange scan_range;
-    if (OB_FAIL(ret)) {
-    } else if (OB_FAIL(advance_doc_id_.get_datum().to_obj(obj_ptr[1], inv_scan_domain_id_col_->obj_meta_))) {
-      LOG_WARN("failed to set obj", K(ret));
-    } else {
+    if (OB_SUCC(ret)) {
+      ObNewRange scan_range;
       scan_range.table_id_ = inv_idx_scan_param_->key_ranges_.at(0).table_id_;
-      scan_range.start_key_.assign(obj_ptr, INV_IDX_ROWKEY_COL_CNT);
-      scan_range.end_key_.assign(&obj_ptr[2], INV_IDX_ROWKEY_COL_CNT);
+      scan_range.start_key_.assign(start_objs, INV_IDX_ROWKEY_COL_CNT);
+      if (function_lookup) {
+        scan_range.end_key_.assign(start_objs, INV_IDX_ROWKEY_COL_CNT);
+      } else {
+        scan_range.end_key_.assign(end_objs, INV_IDX_ROWKEY_COL_CNT);
+      }
       scan_range.border_flag_.set_inclusive_start();
       scan_range.border_flag_.set_inclusive_end();
-    }
-    if (OB_FAIL(ret)) {
-    } else if (OB_FAIL(inv_idx_scan_iter_->reuse())) {
-      LOG_WARN("failed to reuse inverted index scan iterator", K(ret));
-    } else if (OB_UNLIKELY(!inv_idx_scan_param_->key_ranges_.empty())) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("unexpected non-empty scan range", K(ret), K(inv_idx_scan_param_->key_ranges_));
-    } else if (OB_FAIL(inv_idx_scan_param_->key_ranges_.push_back(scan_range))) {
-      LOG_WARN("failed to push back scan range", K(ret));
-    } else if (OB_FAIL(inv_idx_scan_iter_->rescan())) {
-      LOG_WARN("failed to rescan inverted index", K(ret));
+      if (OB_FAIL(inv_idx_scan_iter_->reuse())) {
+        LOG_WARN("failed to reuse inverted index scan iterator", K(ret));
+      } else if (OB_UNLIKELY(!inv_idx_scan_param_->key_ranges_.empty())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected non-empty scan range", K(ret), K(inv_idx_scan_param_->key_ranges_));
+      } else if (OB_FAIL(inv_idx_scan_param_->key_ranges_.push_back(scan_range))) {
+        LOG_WARN("failed to push back scan range", K(ret));
+      } else if (OB_FAIL(inv_idx_scan_iter_->rescan())) {
+        LOG_WARN("failed to rescan inverted index", K(ret));
+      }
     }
   }
   return ret;
@@ -495,16 +511,8 @@ int ObTextRetrievalTokenIter::update_scan_param(const ObString &token, common::O
     LOG_WARN("unexpected key range count", K(ret), K(inv_idx_agg_param_->key_ranges_.count()));
   } else {
     ObNewRange scan_range = inv_idx_agg_param_->key_ranges_.at(0);
-    ObObj tmp_obj;
-    tmp_obj.set_string(ObVarcharType, token);
-    tmp_obj.set_meta_type(scan_range.start_key_.get_obj_ptr()->meta_);
-    if (scan_range.start_key_.get_obj_ptr() + 2 != scan_range.end_key_.get_obj_ptr()) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("unexpected rowkey", K(ret), K_(scan_range.start_key), K_(scan_range.end_key));
-    } else if (OB_FAIL(ob_write_obj(allocator, tmp_obj, *scan_range.start_key_.get_obj_ptr()))) {
-      LOG_WARN("failed to write obj", K(ret));
-    } else if (OB_FAIL(ob_write_obj(allocator, tmp_obj, *scan_range.end_key_.get_obj_ptr()))) {
-      LOG_WARN("failed to write obj", K(ret));
+    if (OB_FAIL(update_range_with_token(scan_range, token, allocator))) {
+      LOG_WARN("failed to update agg scan range token", K(ret));
     } else if (!need_inv_idx_agg()) {
       // skip inverted index aggregate iterator
     } else if (OB_FAIL(inv_idx_agg_iter_->reuse())) {
@@ -526,13 +534,17 @@ int ObTextRetrievalTokenIter::update_scan_param(const ObString &token, common::O
         == inv_idx_scan_param_->key_ranges_.at(0).end_key_.get_obj_ptr()) {
       // function lookup mode
       ObSEArray<ObNewRange, 4> scan_ranges;
-      scan_ranges.assign(inv_idx_scan_param_->key_ranges_);
-      for (int64_t i = 0; OB_SUCC(ret) && i < scan_ranges.count(); ++i) {
-        if (OB_FAIL(ob_write_obj(allocator, tmp_obj, *scan_ranges.at(i).start_key_.get_obj_ptr()))) {
-          LOG_WARN("failed to write obj", K(ret));
+      if (OB_FAIL(scan_ranges.assign(inv_idx_scan_param_->key_ranges_))) {
+        LOG_WARN("failed to assign scan ranges", K(ret));
+      } else {
+        for (int64_t i = 0; OB_SUCC(ret) && i < scan_ranges.count(); ++i) {
+          if (OB_FAIL(update_range_with_token(scan_ranges.at(i), token, allocator))) {
+            LOG_WARN("failed to update scan range", K(ret));
+          }
         }
       }
-      if (FAILEDx(inv_idx_scan_iter_->reuse())) {
+      if (FAILEDx(ret)) {
+      } else if (OB_FAIL(inv_idx_scan_iter_->reuse())) {
         LOG_WARN("failed to reuse inverted index scan iterator", K(ret));
       } else if (OB_UNLIKELY(!inv_idx_scan_param_->key_ranges_.empty())) {
         ret = OB_ERR_UNEXPECTED;
@@ -544,7 +556,8 @@ int ObTextRetrievalTokenIter::update_scan_param(const ObString &token, common::O
       }
     } else {
       // non-function lookup mode
-      if (OB_FAIL(inv_idx_scan_iter_->reuse())) {
+      if (OB_FAIL(ret)) {
+      } else if (OB_FAIL(inv_idx_scan_iter_->reuse())) {
         LOG_WARN("failed to reuse inverted index scan iterator", K(ret));
       } else if (OB_UNLIKELY(!inv_idx_scan_param_->key_ranges_.empty())) {
         ret = OB_ERR_UNEXPECTED;
@@ -1120,6 +1133,54 @@ int ObTextRetrievalBlockMaxIter::init_block_max_iter(const int64_t total_doc_cnt
     LOG_WARN("failed to init block max iter", K(ret));
   } else {
     block_max_inited_ = true;
+  }
+  return ret;
+}
+
+int ObTextRetrievalTokenIter::update_range_with_token(
+    ObNewRange &range,
+    const ObString &token,
+    common::ObIAllocator &allocator)
+{
+  int ret = OB_SUCCESS;
+  ObObj *start_objs = range.start_key_.get_obj_ptr();
+  ObObj *end_objs = range.end_key_.get_obj_ptr();
+  const bool function_lookup = (start_objs == end_objs);
+  if (OB_ISNULL(start_objs)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null start key obj", K(ret), K(range));
+  } else if (OB_UNLIKELY(!function_lookup && OB_ISNULL(end_objs))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null end key obj", K(ret), K(range));
+  } else if (OB_UNLIKELY(!function_lookup
+             && start_objs + INV_IDX_ROWKEY_COL_CNT != end_objs)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected rowkey buffer layout", K(ret), K(range));
+  } else {
+  ObObj token_obj;
+  ObObjMeta token_meta;
+  token_meta.set_type(start_objs[INV_IDX_TOKEN_KEY_IDX].get_type());
+  token_meta.set_collation_level(start_objs[INV_IDX_TOKEN_KEY_IDX].get_collation_level());
+  token_meta.set_collation_type(start_objs[INV_IDX_TOKEN_KEY_IDX].get_collation_type());
+  token_meta.set_scale(start_objs[INV_IDX_TOKEN_KEY_IDX].get_scale());
+  token_obj.set_string(token_meta.get_type(), token);
+  token_obj.set_meta_type(token_meta);
+  if (OB_FAIL(ob_write_obj(allocator, token_obj, start_objs[INV_IDX_TOKEN_KEY_IDX]))) {
+    LOG_WARN("failed to write token obj", K(ret));
+  } else if (!function_lookup &&
+               OB_FAIL(ob_write_obj(allocator, token_obj, end_objs[INV_IDX_TOKEN_KEY_IDX]))) {
+    LOG_WARN("failed to write token obj to end key", K(ret));
+  } else {
+    uint64_t token_hash = 0;
+    if (OB_FAIL(share::ObFtsIndexBuilderUtil::calc_token_hash(token_meta, token, token_hash))) {
+      LOG_WARN("failed to calc token hash", K(ret));
+    } else {
+        start_objs[INV_IDX_HASH_KEY_IDX].set_uint64(token_hash);
+        if (!function_lookup) {
+          end_objs[INV_IDX_HASH_KEY_IDX].set_uint64(token_hash);
+        }
+      }
+    }
   }
   return ret;
 }

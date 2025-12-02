@@ -108,6 +108,9 @@ private:
 public:
   static const int64_t FWD_IDX_ROWKEY_COL_CNT = 2;
   static const int64_t INV_IDX_ROWKEY_COL_CNT = 3;
+  static const int64_t INV_IDX_HASH_KEY_IDX = 0;
+  static const int64_t INV_IDX_TOKEN_KEY_IDX = 1;
+  static const int64_t INV_IDX_DOC_KEY_IDX = 2;
 private:
   lib::MemoryContext mem_context_;
   ObArenaAllocator *allocator_;
@@ -134,6 +137,10 @@ private:
   bool token_doc_cnt_calculated_;
   bool inv_idx_agg_cache_mode_;
   bool is_inited_;
+  int update_range_with_token(
+      ObNewRange &range,
+      const ObString &token,
+      common::ObIAllocator &allocator);
   DISALLOW_COPY_AND_ASSIGN(ObTextRetrievalTokenIter);
 };
 

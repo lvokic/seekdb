@@ -35,7 +35,7 @@ namespace sql
 
 
 ObObjDatumMapType ObFTIndexRowCache::FTS_INDEX_TYPES[] = {
-    OBJ_DATUM_8BYTE_DATA, OBJ_DATUM_STRING, OBJ_DATUM_STRING, OBJ_DATUM_8BYTE_DATA, OBJ_DATUM_8BYTE_DATA};
+    OBJ_DATUM_STRING, OBJ_DATUM_STRING, OBJ_DATUM_8BYTE_DATA, OBJ_DATUM_8BYTE_DATA};
 ObObjDatumMapType ObFTIndexRowCache::FTS_DOC_WORD_TYPES[] = {OBJ_DATUM_STRING, OBJ_DATUM_STRING, OBJ_DATUM_8BYTE_DATA, OBJ_DATUM_8BYTE_DATA};
 
 ObExprOperatorType ObFTIndexRowCache::FTS_INDEX_EXPR_TYPE[] = {T_FUN_SYS_WORD_SEGMENT, T_FUN_SYS_DOC_ID, T_FUN_SYS_WORD_COUNT, T_FUN_SYS_DOC_LENGTH};
@@ -329,10 +329,11 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
                                                              storage::ObFTWordMap *word_map)
 {
   int ret = OB_SUCCESS;
-  const int64_t column_cnt = is_fts_index_aux ? share::ObFtsIndexBuilderUtil::OB_FTS_INDEX_TABLE_COLUMN_CNT
-                                              : share::ObFtsIndexBuilderUtil::OB_FTS_DOC_WORD_TABLE_COLUMN_CNT;
   static constexpr int64_t FT_MAX_WORD_BUCKET = 997;
   const int64_t ft_word_bkt_cnt = MIN(MAX(fulltext.length() / 10, 2), FT_MAX_WORD_BUCKET);
+  const int64_t column_cnt = is_fts_index_aux 
+      ? share::ObFtsIndexBuilderUtil::OB_FTS_INDEX_TABLE_COLUMN_CNT 
+      : share::ObFtsIndexBuilderUtil::OB_FTS_DOC_WORD_TABLE_COLUMN_CNT;
   int64_t doc_length = 0;
   storage::ObFTWordMap local_word_map;
   storage::ObFTWordMap *ft_word_map = OB_NOT_NULL(word_map) ? word_map : &local_word_map;
@@ -343,65 +344,83 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
     LOG_WARN("invalid arguments", K(ret), KPC(helper), K(ft_obj_meta), K(doc_id_datum));
   } else if (0 == fulltext.length()) {
     ret = OB_ITER_END;
-  } else if (OB_FAIL(ft_word_map->create(ft_word_bkt_cnt, common::ObMemAttr(MTL_ID(), "FTWordMap")))) {
-    LOG_WARN("fail to create ft word map", K(ret), K(ft_word_bkt_cnt));
-  } else if (OB_FAIL(segment_and_calc_word_count(allocator,
-                                                 helper,
-                                                 ft_obj_meta,
-                                                 fulltext,
-                                                 doc_length,
-                                                 *ft_word_map))) {
-    LOG_WARN("fail to segment and calculate word count", K(ret), KPC(helper),
-        K(ft_obj_meta.get_collation_type()), K(fulltext));
-  } else if (0 == ft_word_map->size()) {
-    ret = OB_ITER_END;
-  } else if (OB_ISNULL(rows_buf = reinterpret_cast<char *>(
-                           allocator.alloc(ft_word_map->size() * sizeof(blocksstable::ObDatumRow))))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-    LOG_WARN("failed to alloc memory for full text index rows buffer", K(ret));
-  } else {
-    int64_t i = 0;
-    rows = new (rows_buf) blocksstable::ObDatumRow[ft_word_map->size()];
-    for (ObFTWordMap::const_iterator iter = ft_word_map->begin();
-         OB_SUCC(ret) && iter != ft_word_map->end();
-         ++iter) {
-      if (OB_FAIL(rows[i].init(allocator, column_cnt))) {
-        LOG_WARN("init datum row failed", K(ret), K(column_cnt));
-      } else {
-        const ObFTWord &ft_word = iter->first;
-        const int64_t word_cnt = iter->second;
-        if (is_fts_index_aux) {
-          // ============ 倒排索引 (Inverted Index) ============
-          // 1. Hash (UInt64), 2. Word, 3. DocID, 4. Count, 5. Len
-          uint64_t hash_val = 0;
-          ft_word.hash(hash_val); // 调用 ObFTWord 计算好的二进制 Hash
-          rows[i].storage_datums_[0].set_uint(hash_val);   
-          rows[i].storage_datums_[1].set_datum(ft_word.get_word());
-          rows[i].storage_datums_[2].shallow_copy_from_datum(doc_id_datum);
-          rows[i].storage_datums_[3].set_uint(word_cnt);
-          rows[i].storage_datums_[4].set_uint(doc_length);
-        } else {
-          // ============ 正排索引 (Forward Index) ============
-          // 1. DocID, 2. Word, 3. Count, 4. Len
-          //  - FTS_DOC_WORD: [DOC_ID], [WORD], [WORD_COUNT], [DOC_LENGTH]
-          const int64_t word_idx = is_fts_index_aux ? 0 : 1;
-          const int64_t doc_id_idx = is_fts_index_aux ? 1 : 0;
-          const int64_t word_cnt_idx = 2;
-          const int64_t doc_len_idx = 3;
-          rows[i].storage_datums_[word_idx].set_datum(ft_word.get_word());
-          rows[i].storage_datums_[doc_id_idx].shallow_copy_from_datum(doc_id_datum);
-          rows[i].storage_datums_[word_cnt_idx].set_uint(word_cnt);
-          rows[i].storage_datums_[doc_len_idx].set_uint(doc_length);
+  } else if (OB_ISNULL(ft_word_map)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null ft word map", K(ret));
+  } 
+  if (OB_SUCC(ret)) {
+      if (!ft_word_map->created()) {
+        if (OB_FAIL(ft_word_map->create(ft_word_bkt_cnt, common::ObMemAttr(MTL_ID(), "FTWordMap")))) {
+          LOG_WARN("fail to create ft word map", K(ret), K(ft_word_bkt_cnt));
         }
-        if (OB_FAIL(word_rows.push_back(&rows[i]))) {
-          LOG_WARN("fail to push back row", K(ret), K(rows[i]));
-        } else {
-          LOG_DEBUG("succeed to add word row", K(ret), K(is_fts_index_aux), K(ft_word), K(word_cnt), K(i), K(rows[i]));
-          ++i;
+      } else if (ft_word_map->bucket_count() < ft_word_bkt_cnt) {
+        if (OB_FAIL(ft_word_map->destroy())) {
+          LOG_WARN("fail to destroy ft word map", K(ret));
+        } else if (OB_FAIL(ft_word_map->create(ft_word_bkt_cnt, common::ObMemAttr(MTL_ID(), "FTWordMap")))) {
+          LOG_WARN("fail to recreate ft word map", K(ret), K(ft_word_bkt_cnt));
         }
       }
-    }
   }
+  if (OB_SUCC(ret)) {
+      if (OB_FAIL(segment_and_calc_word_count(allocator,
+                                              helper,
+                                              ft_obj_meta,
+                                              fulltext,
+                                              doc_length,
+                                              *ft_word_map))) {
+        LOG_WARN("fail to segment and calculate word count", K(ret), KPC(helper),
+            K(ft_obj_meta.get_collation_type()), K(fulltext));
+      } else if (0 == ft_word_map->size()) {
+        ret = OB_ITER_END;
+      }
+  }
+  if (OB_SUCC(ret)) {
+      if (OB_ISNULL(rows_buf = reinterpret_cast<char *>(
+                        allocator.alloc(ft_word_map->size() * sizeof(blocksstable::ObDatumRow))))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_WARN("failed to alloc memory for full text index rows buffer", K(ret));
+      } else {
+        int64_t i = 0;
+        rows = new (rows_buf) blocksstable::ObDatumRow[ft_word_map->size()];
+        for (ObFTWordMap::const_iterator iter = ft_word_map->begin();
+            OB_SUCC(ret) && iter != ft_word_map->end();
+            ++iter) {
+          if (OB_FAIL(rows[i].init(allocator, column_cnt))) {
+            LOG_WARN("init datum row failed", K(ret), K(column_cnt));
+          } else {
+            const ObFTWord &ft_word = iter->first;
+            const int64_t word_cnt = iter->second;
+            const int64_t hash_idx = is_fts_index_aux ? 0 : -1;
+            const int64_t word_idx = 1;
+            const int64_t doc_id_idx = is_fts_index_aux ? 2 : 0;
+            const int64_t word_cnt_idx = is_fts_index_aux ? 3 : 2;
+            const int64_t doc_len_idx = is_fts_index_aux ? 4 : 3;
+            if (is_fts_index_aux) {
+              uint64_t token_hash = 0;
+              if (OB_FAIL(ft_word.hash(token_hash))) {
+                LOG_WARN("failed to calc token hash", K(ret), K(ft_word));
+              } else {
+                rows[i].storage_datums_[hash_idx].set_uint(token_hash);
+              }
+            }
+            if (OB_SUCC(ret)) {
+               rows[i].storage_datums_[word_idx].set_datum(ft_word.get_word());
+            }
+            if (OB_SUCC(ret)) {
+                rows[i].storage_datums_[doc_id_idx].shallow_copy_from_datum(doc_id_datum);
+                rows[i].storage_datums_[word_cnt_idx].set_uint(word_cnt);
+                rows[i].storage_datums_[doc_len_idx].set_uint(doc_length);
+                if (OB_FAIL(word_rows.push_back(&rows[i]))) {
+                    LOG_WARN("fail to push back row", K(ret), K(rows[i]));
+                } else {
+                    ++i;
+                }
+            }
+          }
+        } // end for
+      }
+  }
+ 
   return ret;
 }
 
@@ -1319,35 +1338,70 @@ int ObFTDMLIterator::build_ft_word_row(
     blocksstable::ObDatumRow *&dest_row)
 {
   int ret = OB_SUCCESS;
-  const int64_t DOC_ID_IDX = das_ctdef_->table_param_.get_data_table().is_fts_index_aux() ? 1 : 0;
-  const int64_t WORD_SEGMENT_IDX = das_ctdef_->table_param_.get_data_table().is_fts_index_aux() ? 0 : 1;
-  static int64_t WORD_COUNT_IDX = 2;
-  static int64_t DOC_LENGTH_IDX = 3;
+  const bool is_fts_index = das_ctdef_->table_param_.get_data_table().is_fts_index_aux();
+  const int64_t SRC_DOC_ID_IDX = 0;
+  const int64_t SRC_WORD_IDX = 1;
+  const int64_t SRC_WORD_COUNT_IDX = 2;
+  const int64_t SRC_DOC_LENGTH_IDX = 3;
+  const int64_t DEST_HASH_IDX = is_fts_index ? 0 : -1;
+  const int64_t DEST_WORD_IDX = is_fts_index ? 1 : SRC_WORD_IDX;
+  const int64_t DEST_DOC_ID_IDX = is_fts_index ? 2 : SRC_DOC_ID_IDX;
+  const int64_t DEST_WORD_COUNT_IDX = is_fts_index ? 3 : SRC_WORD_COUNT_IDX;
+  const int64_t DEST_DOC_LENGTH_IDX = is_fts_index ? 4 : SRC_DOC_LENGTH_IDX;
+  const int64_t src_col_cnt = share::ObFtsIndexBuilderUtil::OB_FTS_DOC_WORD_TABLE_COLUMN_CNT;
+  const int64_t dest_col_cnt = is_fts_index
+      ? share::ObFtsIndexBuilderUtil::OB_FTS_INDEX_TABLE_COLUMN_CNT
+      : share::ObFtsIndexBuilderUtil::OB_FTS_DOC_WORD_TABLE_COLUMN_CNT;
   void *buf = nullptr;
   blocksstable::ObDatumRow *tmp_row = nullptr;
   if (OB_ISNULL(src_row)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid arguments", K(ret), KPC(src_row));
-  } else if (OB_UNLIKELY(4 != src_row->count_)) {
+  } else if (OB_UNLIKELY(src_col_cnt != src_row->count_)) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("unexpected error, count of src row isn't 4", K(ret), K(src_row->count_), KPC(src_row));
+    LOG_WARN("unexpected error, count of src row isn't expected", K(ret), K(src_row->count_), K(src_col_cnt), KPC(src_row));
   } else if (OB_ISNULL(buf = allocator_.alloc(sizeof(blocksstable::ObDatumRow)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("fail to allocate datum row", K(ret));
   } else if (FALSE_IT(tmp_row = new (buf) blocksstable::ObDatumRow())) {
-  } else if (OB_FAIL(tmp_row->init(src_row->count_))) {
+  } else if (OB_FAIL(tmp_row->init(dest_col_cnt))) {
   } else if (OB_FAIL(tmp_row->copy_attributes_except_datums(*src_row))) {
     LOG_WARN("fail to copy attributes expcept datums", K(ret), KPC(src_row));
-  } else if (OB_FAIL(tmp_row->storage_datums_[DOC_ID_IDX].deep_copy(src_row->storage_datums_[0], allocator_))) {
-    LOG_WARN("fail to deep copy doc id datum", K(ret), K(DOC_ID_IDX));
-  } else if (OB_FAIL(tmp_row->storage_datums_[WORD_SEGMENT_IDX].deep_copy(src_row->storage_datums_[1], allocator_))) {
-    LOG_WARN("fail to deep copy word segment datum", K(ret), K(WORD_SEGMENT_IDX));
-  } else if (OB_FAIL(tmp_row->storage_datums_[WORD_COUNT_IDX].deep_copy(src_row->storage_datums_[2], allocator_))) {
-    LOG_WARN("fail to deep copy word count datum", K(ret), K(WORD_COUNT_IDX));
-  } else if (OB_FAIL(tmp_row->storage_datums_[DOC_LENGTH_IDX].deep_copy(src_row->storage_datums_[3], allocator_))) {
-    LOG_WARN("fail to deep copy doc lenght datum", K(ret), K(DOC_LENGTH_IDX));
+  } else if (is_fts_index &&
+             OB_UNLIKELY(das_ctdef_->column_types_.count() <= DEST_WORD_IDX)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected column types for ft index", K(ret), K(DEST_WORD_IDX), K(das_ctdef_->column_types_.count()));
   } else {
-    dest_row = tmp_row;
+    if (is_fts_index) {
+      uint64_t token_hash = 0;
+      const ObDatum &word_datum = src_row->storage_datums_[SRC_WORD_IDX];
+      if (word_datum.is_null()) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("word datum is null", K(ret));
+      } else if (OB_FAIL(share::ObFtsIndexBuilderUtil::calc_token_hash(
+                     das_ctdef_->column_types_.at(DEST_WORD_IDX),
+                     word_datum.get_string(),
+                     token_hash))) {
+        LOG_WARN("failed to calc token hash", K(ret), K(word_datum));
+      } else {
+        tmp_row->storage_datums_[DEST_HASH_IDX].set_uint(token_hash);
+      }
+    }
+    if (FAILEDx(tmp_row->storage_datums_[DEST_DOC_ID_IDX].deep_copy(
+            src_row->storage_datums_[SRC_DOC_ID_IDX], allocator_))) {
+      LOG_WARN("fail to deep copy doc id datum", K(ret), K(DEST_DOC_ID_IDX));
+    } else if (OB_FAIL(tmp_row->storage_datums_[DEST_WORD_IDX].deep_copy(
+                   src_row->storage_datums_[SRC_WORD_IDX], allocator_))) {
+      LOG_WARN("fail to deep copy word segment datum", K(ret), K(DEST_WORD_IDX));
+    } else if (OB_FAIL(tmp_row->storage_datums_[DEST_WORD_COUNT_IDX].deep_copy(
+                   src_row->storage_datums_[SRC_WORD_COUNT_IDX], allocator_))) {
+      LOG_WARN("fail to deep copy word count datum", K(ret), K(DEST_WORD_COUNT_IDX));
+    } else if (OB_FAIL(tmp_row->storage_datums_[DEST_DOC_LENGTH_IDX].deep_copy(
+                   src_row->storage_datums_[SRC_DOC_LENGTH_IDX], allocator_))) {
+      LOG_WARN("fail to deep copy doc length datum", K(ret), K(DEST_DOC_LENGTH_IDX));
+    } else {
+      dest_row = tmp_row;
+    }
   }
   return ret;
 }

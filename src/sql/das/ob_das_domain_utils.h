@@ -34,7 +34,7 @@ namespace sql
 class ObFTIndexRowCache final
 {
 public:
-  static ObObjDatumMapType FTS_INDEX_TYPES[share::ObFtsIndexBuilderUtil::OB_FTS_INDEX_TABLE_COLUMN_CNT];
+  static ObObjDatumMapType FTS_INDEX_TYPES[share::ObFtsIndexBuilderUtil::OB_FTS_DOC_WORD_TABLE_COLUMN_CNT];
   static ObObjDatumMapType FTS_DOC_WORD_TYPES[4];
   static ObExprOperatorType FTS_INDEX_EXPR_TYPE[4];
   static ObExprOperatorType FTS_DOC_WORD_EXPR_TYPE[4];

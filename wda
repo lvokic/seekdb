@@ -1,4 +1,4 @@
-CREATE TABLE Item (
+CREATE TABLE Item(
         id BIGINT AUTO_INCREMENT,
         base_id VARCHAR(255) NOT NULL,
         docid_col VARCHAR(255) NOT NULL,
@@ -8,6 +8,9 @@ CREATE TABLE Item (
 INSERT INTO Item (base_id, docid_col, fulltext_col)
     VALUES ('123', '214s', 'This is a sample fulltext content for testing purposes.'),
            ('124', '215s', 'Another example of fulltext content to be indexed.'),
+           ('125', '216s', 'Fulltext search capabilities are important for many applications.'),
+           ('123', '214s', 'This is a sample fulltext content for testing purposes.'),
+           ('124', '215s', 'Another example of fulltext content to be indexed.'),
            ('125', '216s', 'Fulltext search capabilities are important for many applications.');
 
 CREATE FULLTEXT INDEX idx_fulltext_col ON Item(fulltext_col);
@@ -16,7 +19,7 @@ SELECT
     id,
     fulltext_col,
     MATCH(fulltext_col) AGAINST('sample 1' IN NATURAL LANGUAGE MODE) AS text_score
-FROM test_insert_en
+FROM item
 WHERE MATCH(fulltext_col) AGAINST('sample 1' IN NATURAL LANGUAGE MODE)
 ORDER BY text_score DESC
 LIMIT 2;
@@ -39,10 +42,10 @@ LIMIT 5;
 
 explain SELECT * FROM test_insert_en WHERE MATCH(fulltext_col) AGAINST('OceanBaseSuperTestWord' IN NATURAL LANGUAGE MODE) limit 3;
 
-explain SELECT * FROM item WHERE MATCH(fulltext_col) AGAINST('OceanBaseSuperTestWord' IN NATURAL LANGUAGE MODE) limit 3;
+SELECT * FROM item WHERE MATCH(fulltext_col) AGAINST('sample' IN NATURAL LANGUAGE MODE);
 
 #!/bin/bash
- 
+
 # Step 1: Start perf to collect data for 20 seconds
 echo "Starting perf to collect data..."
 perf record -F 99 -p 31691 -g -- sleep 20
@@ -64,10 +67,13 @@ kill -9 $(pidof observer)
 bash build.sh debug -DOB_USE_CCACHE=ON --init --make -j6
 cp build_debug/src/observer/observer ~/seekdb/bin
 
+./bin/observer
 ./deps/3rd/u01/obclient/bin/obclient -h127.0.0.1 -P2881 -uroot -Dtest -A
 
 
 DROP INDEX ft_fulltext ON test_insert_en;
 create fulltext index ft_fulltext on test_insert_en(fulltext_col);
 
-b ObDASTextRetrievalIter::gen_inv_idx_scan_range
+b ObFtsIndexBuilderUtil::set_fts_index_table_columns
+
+b ObDASDomainUtils::generate_fulltext_word_rows

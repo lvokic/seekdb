@@ -376,11 +376,13 @@ int ObFtsIndexBuilderUtil::adjust_fts_args(
   int ret = OB_SUCCESS;
   const ObIndexType &index_type = index_arg.index_type_;
 
+  uint64_t token_hash_col_id = OB_INVALID_ID;
   uint64_t doc_id_col_id = OB_INVALID_ID;
   uint64_t word_col_id = OB_INVALID_ID;
   uint64_t word_count_col_id = OB_INVALID_ID;
   uint64_t doc_len_col_id = OB_INVALID_ID;
 
+  const ObColumnSchemaV2 *existing_token_hash_col = nullptr;
   const ObColumnSchemaV2 *existing_doc_id_col = nullptr;
   const ObColumnSchemaV2 *existing_rowkey_col = nullptr;
   const ObColumnSchemaV2 *existing_word_col = nullptr;
@@ -389,6 +391,7 @@ int ObFtsIndexBuilderUtil::adjust_fts_args(
 
   uint64_t available_col_id = data_schema.get_max_used_column_id() + 1;
 
+  ObColumnSchemaV2 *generated_token_hash_col = nullptr;
   ObColumnSchemaV2 *generated_doc_id_col = nullptr;
   ObColumnSchemaV2 *generated_word_col = nullptr;
   ObColumnSchemaV2 *generated_doc_len_col = nullptr;
@@ -431,6 +434,9 @@ int ObFtsIndexBuilderUtil::adjust_fts_args(
     } else if ((is_fts_index || is_doc_word)
                && OB_FAIL(get_word_cnt_col(data_schema, &index_arg, existing_word_count_col))) {
       LOG_WARN("failed to get word cnt col", K(ret));
+    } else if ((is_fts_index || is_doc_word)
+               && OB_FAIL(get_token_hash_col(data_schema, existing_token_hash_col))) {
+      LOG_WARN("failed to get token hash col", K(ret));
     } else if (existing_word_col && is_fts_index) {
       // Add warnings but still make it pass
       LOG_USER_WARN(OB_ERR_DUPLICATE_INDEX,
@@ -456,6 +462,26 @@ int ObFtsIndexBuilderUtil::adjust_fts_args(
     // Gen other by condition.
     if (OB_FAIL(ret)) {
     } else if (is_fts_index || is_doc_word) {
+      // Gen col: token hash
+      bool is_hash_new = false;
+      if (OB_SUCC(ret) && OB_ISNULL(existing_token_hash_col)) {
+          token_hash_col_id = available_col_id++;
+          if (OB_FAIL(generate_token_hash_column(
+                  &index_arg,
+                  token_hash_col_id,
+                  data_schema,
+                  generated_token_hash_col,
+                  is_hash_new,
+                  allocator))) {
+              LOG_WARN("failed to generate token hash column", K(ret));
+          } 
+          else if (is_hash_new && OB_FAIL(gen_columns.push_back(generated_token_hash_col))) {
+              LOG_WARN("failed to push back token hash column", K(ret));
+          }
+      } else {
+          generated_token_hash_col = const_cast<ObColumnSchemaV2*>(existing_token_hash_col);
+      }
+
       // Gen col: word
       if (OB_SUCC(ret) && OB_ISNULL(existing_word_col)) {
         word_col_id = available_col_id++;
@@ -506,7 +532,9 @@ int ObFtsIndexBuilderUtil::adjust_fts_args(
     // │table  │  │index  │
     // └───────┘  └───────┘
     if (is_fts_index) {
-      if (OB_FAIL(push_back_gen_col(tmp_cols, existing_word_col, generated_word_col))) {
+      if (OB_FAIL(push_back_gen_col(tmp_cols, existing_token_hash_col, generated_token_hash_col))) {
+        LOG_WARN("failed to push back token hash col", K(ret));
+      } else if (OB_FAIL(push_back_gen_col(tmp_cols, existing_word_col, generated_word_col))) {
         LOG_WARN("failed to push back word col", K(ret));
       } else if (OB_FAIL(push_back_gen_col(tmp_cols, existing_rowkey_col, nullptr))) {
         LOG_WARN("failed to push back doc id col", K(ret));
@@ -554,7 +582,9 @@ int ObFtsIndexBuilderUtil::adjust_fts_args(
         LOG_WARN("failed to append fts_index arg", K(ret));
       }
     } else if (is_fts_index) {
-      if (OB_FAIL(push_back_gen_col(tmp_cols, existing_word_col, generated_word_col))) {
+      if (OB_FAIL(push_back_gen_col(tmp_cols, existing_token_hash_col, generated_token_hash_col))) {
+        LOG_WARN("failed to push back token hash col", K(ret));
+      } else if (OB_FAIL(push_back_gen_col(tmp_cols, existing_word_col, generated_word_col))) {
         LOG_WARN("failed to push back word col", K(ret));
       } else if (OB_FAIL(push_back_gen_col(tmp_cols, existing_doc_id_col, generated_doc_id_col))) {
         LOG_WARN("failed to push back doc id col", K(ret));
@@ -774,12 +804,14 @@ int ObFtsIndexBuilderUtil::set_fts_index_table_columns(
     ObTableSchema &index_schema)
 {
   int ret = OB_SUCCESS;
+  const bool is_main_index = share::schema::is_fts_index_aux(arg.index_type_);
+  const int expected_index_col_cnt = is_main_index ? 3 : 2;
   if (!data_schema.is_valid() ||
-      (!share::schema::is_fts_index_aux(arg.index_type_) &&
+      (!is_main_index &&
       !share::schema::is_fts_doc_word_aux(arg.index_type_)) ||
-      arg.index_columns_.count() != 2 ||
+      arg.index_columns_.count() != expected_index_col_cnt ||
       arg.store_columns_.count() != 2) {
-    // expect word col, doc id col in index_columns,
+    // expect token hash col, word col, doc id col in index_columns,
     // expect worc count, doc length col in store_columns.
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(ret), K(data_schema), K(arg.index_type_),
@@ -787,34 +819,6 @@ int ObFtsIndexBuilderUtil::set_fts_index_table_columns(
         K(arg.index_columns_), K(arg.store_columns_));
   }
   HEAP_VAR(ObRowDesc, row_desc) {
-    ObColumnSchemaV2 hash_column;
-    const uint64_t next_column_id = std::max(index_schema.get_max_used_column_id() + 1,
-      static_cast<uint64_t>(common::OB_APP_MIN_COLUMN_ID));
-    hash_column.set_tenant_id(data_schema.get_tenant_id());
-    hash_column.set_table_id(index_schema.get_table_id());
-    hash_column.set_column_id(next_column_id);
-    hash_column.set_data_type(ObUInt64Type);
-    hash_column.set_collation_type(CS_TYPE_BINARY);
-    hash_column.set_data_length(static_cast<int32_t>(sizeof(uint64_t)));
-    hash_column.set_nullable(false);
-    const ObAccuracy &hash_accuracy = ObAccuracy::DDL_DEFAULT_ACCURACY2[ORACLE_MODE][ObUInt64Type];
-    hash_column.set_accuracy(hash_accuracy);
-    hash_column.set_is_hidden(false);
-    if (OB_FAIL(hash_column.set_column_name(ObString::make_string(FTS_TOKEN_HASH_COLUMN_NAME)))) {
-      LOG_WARN("failed to set token hash column name", K(ret));
-    } else if (OB_FAIL(ObIndexBuilderUtil::add_column(&hash_column,
-                                                   true,               // is_index_column
-                                                   true,               // is_rowkey (关键!)
-                                                   ObOrderType::ASC,   // 升序排列 (关键!)
-                                                   row_desc,
-                                                   index_schema,
-                                                   false,              // is_hidden
-                                                   false))) {          // is_specified_storing_col
-      LOG_WARN("failed to add fts hash column", K(ret));
-    } else {
-      index_schema.set_max_used_column_id(std::max(index_schema.get_max_used_column_id(), hash_column.get_column_id()));
-      LOG_INFO("Succeed to add FTS Hash Prefix Column");
-    }
     // 1. add word col, doc id col to fts index table
     for (int64_t i = 0; OB_SUCC(ret) && i < arg.index_columns_.count(); ++i) {
       const ObColumnSchemaV2 *fts_column = nullptr;
@@ -954,7 +958,7 @@ int ObFtsIndexBuilderUtil::adjust_fts_arg(
     const bool is_doc_word = share::schema::is_fts_doc_word_aux(index_arg->index_type_);
     if ((is_rowkey_doc && fts_cols.count() != 1) ||
         (is_doc_rowkey && fts_cols.count() != 1) ||
-        (is_fts_index && fts_cols.count() != 4) ||
+        (is_fts_index && fts_cols.count() != 5) ||
         (is_doc_word && fts_cols.count() != 4) ) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("fts cols count not expected", K(ret), K(index_type), K(fts_cols));
@@ -1194,6 +1198,65 @@ int ObFtsIndexBuilderUtil::decide_parallelism(
         LOG_WARN("index type may be wrong", K(ret), K(index_type));
         break;
     }
+  }
+  return ret;
+}
+
+int ObFtsIndexBuilderUtil::generate_token_hash_column(
+    const ObCreateIndexArg *index_arg,
+    const uint64_t col_id,
+    ObTableSchema &data_schema, 
+    ObColumnSchemaV2 *&token_hash_col,
+    bool &is_new_col,        
+    ObIAllocator &allocator) 
+{
+  int ret = OB_SUCCESS;
+  token_hash_col = nullptr;
+  is_new_col = false;
+  const char* col_name_ptr = FTS_TOKEN_HASH_COLUMN_NAME;
+  const ObColumnSchemaV2 *existing_col = data_schema.get_column_schema(col_name_ptr);
+  if (OB_NOT_NULL(existing_col)) {
+      token_hash_col = data_schema.get_column_schema(existing_col->get_column_id());
+      return OB_SUCCESS;
+  }
+  void *buf = allocator.alloc(sizeof(ObColumnSchemaV2));
+  if (OB_ISNULL(buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("alloc failed", K(ret));
+  } else {
+      ObColumnSchemaV2 *new_col = new (buf) ObColumnSchemaV2();
+      ObObj default_val;
+      default_val.set_uint64(0);
+      new_col->set_orig_default_value(default_val);
+      new_col->set_cur_default_value(default_val, false);
+      new_col->set_tenant_id(data_schema.get_tenant_id());
+      new_col->set_table_id(data_schema.get_table_id());
+      new_col->set_column_id(col_id);
+      new_col->set_rowkey_position(0);
+      new_col->set_index_position(0);
+      new_col->set_tbl_part_key_pos(0);
+      new_col->add_column_flag(GENERATED_FTS_TOKEN_HASH_COLUMN_FLAG);
+      new_col->set_is_hidden(true);
+      new_col->set_nullable(false);
+      new_col->set_data_type(ObUInt64Type);
+      new_col->set_data_length(static_cast<int32_t>(sizeof(uint64_t)));
+      new_col->set_collation_type(common::CS_TYPE_BINARY);
+      new_col->set_charset_type(common::CHARSET_BINARY);
+      new_col->set_prev_column_id(UINT64_MAX);
+      new_col->set_next_column_id(UINT64_MAX);
+      ObSkipIndexColumnAttr skip_attr;
+      skip_attr.set_loose_min_max();
+      new_col->set_skip_index_attr(skip_attr.get_packed_value());
+      if (OB_FAIL(new_col->set_column_name(ObString::make_string(col_name_ptr)))) {
+          LOG_WARN("set column name failed", K(ret));
+      } else if (OB_FAIL(data_schema.add_column(*new_col))) {
+          LOG_WARN("add column failed", K(ret));
+      } else {
+          token_hash_col = data_schema.get_column_schema(new_col->get_column_id());
+          if (token_hash_col == nullptr) token_hash_col = new_col;
+          is_new_col = true;
+          LOG_INFO("succeed to generate token hash column", K(col_id));
+      }
   }
   return ret;
 }
@@ -1733,6 +1796,32 @@ int ObFtsIndexBuilderUtil::check_fts_gen_col(
   return ret;
 }
 
+int ObFtsIndexBuilderUtil::get_token_hash_col(
+    const ObTableSchema &data_schema,
+    const ObColumnSchemaV2 *&token_hash_col)
+{
+  int ret = OB_SUCCESS;
+  token_hash_col = nullptr;
+  if (!data_schema.is_valid()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(ret), K(data_schema));
+  } else {
+    for (ObTableSchema::const_column_iterator iter = data_schema.column_begin();
+         OB_SUCC(ret) && OB_ISNULL(token_hash_col) && iter != data_schema.column_end();
+         iter++) {
+      const ObColumnSchemaV2 *column_schema = *iter;
+      if (OB_ISNULL(column_schema)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected error, column schema is nullptr", K(ret), K(data_schema));
+      } 
+      else if (column_schema->is_token_hash_column()) {
+        token_hash_col = column_schema;
+      }
+    }
+  }
+  return ret;
+}
+
 int ObFtsIndexBuilderUtil::get_doc_id_col(
     const ObTableSchema &data_schema,
     const ObColumnSchemaV2 *&doc_id_col)
@@ -1926,6 +2015,20 @@ int ObFtsIndexBuilderUtil::push_back_gen_col(
     } else if (OB_FAIL(cols.push_back(generated_col))) {
       LOG_WARN("failed to push back generated col", K(ret));
     }
+  }
+  return ret;
+}
+
+int ObFtsIndexBuilderUtil::calc_token_hash(
+    const ObObjMeta &token_meta,
+    const ObString &token,
+    uint64_t &hash_val)
+{
+  int ret = OB_SUCCESS;
+  if (token.empty()) {
+    hash_val = 0;
+  } else {
+    hash_val = common::murmurhash64A(token.ptr(), token.length(), 0);
   }
   return ret;
 }
@@ -2577,6 +2680,8 @@ int ObFtsIndexBuilderUtil::add_skip_index_for_index_column(schema::ObColumnSchem
     skip_index_attr.set_loose_min_max();
   } else if (column_schema.is_word_segment_column()) {
     // skip
+  } else if (column_schema.is_token_hash_column()) {
+    skip_index_attr.set_loose_min_max();
   } else if (column_schema.is_rowkey_column()) {
     // add loose min / max for main table rowkey column
     skip_index_attr.set_loose_min_max();
