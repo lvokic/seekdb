@@ -582,9 +582,7 @@ int ObFtsIndexBuilderUtil::adjust_fts_args(
         LOG_WARN("failed to append fts_index arg", K(ret));
       }
     } else if (is_fts_index) {
-      if (OB_FAIL(push_back_gen_col(tmp_cols, existing_token_hash_col, generated_token_hash_col))) {
-        LOG_WARN("failed to push back token hash col", K(ret));
-      } else if (OB_FAIL(push_back_gen_col(tmp_cols, existing_word_col, generated_word_col))) {
+       if (OB_FAIL(push_back_gen_col(tmp_cols, existing_word_col, generated_word_col))) {
         LOG_WARN("failed to push back word col", K(ret));
       } else if (OB_FAIL(push_back_gen_col(tmp_cols, existing_doc_id_col, generated_doc_id_col))) {
         LOG_WARN("failed to push back doc id col", K(ret));
@@ -1213,50 +1211,122 @@ int ObFtsIndexBuilderUtil::generate_token_hash_column(
   int ret = OB_SUCCESS;
   token_hash_col = nullptr;
   is_new_col = false;
-  const char* col_name_ptr = FTS_TOKEN_HASH_COLUMN_NAME;
-  const ObColumnSchemaV2 *existing_col = data_schema.get_column_schema(col_name_ptr);
-  if (OB_NOT_NULL(existing_col)) {
-      token_hash_col = data_schema.get_column_schema(existing_col->get_column_id());
-      return OB_SUCCESS;
-  }
-  void *buf = allocator.alloc(sizeof(ObColumnSchemaV2));
-  if (OB_ISNULL(buf)) {
-      ret = OB_ALLOCATE_MEMORY_FAILED;
-      LOG_WARN("alloc failed", K(ret));
-  } else {
-      ObColumnSchemaV2 *new_col = new (buf) ObColumnSchemaV2();
-      ObObj default_val;
-      default_val.set_uint64(0);
-      new_col->set_orig_default_value(default_val);
-      new_col->set_cur_default_value(default_val, false);
-      new_col->set_tenant_id(data_schema.get_tenant_id());
-      new_col->set_table_id(data_schema.get_table_id());
-      new_col->set_column_id(col_id);
-      new_col->set_rowkey_position(0);
-      new_col->set_index_position(0);
-      new_col->set_tbl_part_key_pos(0);
-      new_col->add_column_flag(GENERATED_FTS_TOKEN_HASH_COLUMN_FLAG);
-      new_col->set_is_hidden(true);
-      new_col->set_nullable(false);
-      new_col->set_data_type(ObUInt64Type);
-      new_col->set_data_length(static_cast<int32_t>(sizeof(uint64_t)));
-      new_col->set_collation_type(common::CS_TYPE_BINARY);
-      new_col->set_charset_type(common::CHARSET_BINARY);
-      new_col->set_prev_column_id(UINT64_MAX);
-      new_col->set_next_column_id(UINT64_MAX);
-      ObSkipIndexColumnAttr skip_attr;
-      skip_attr.set_loose_min_max();
-      new_col->set_skip_index_attr(skip_attr.get_packed_value());
-      if (OB_FAIL(new_col->set_column_name(ObString::make_string(col_name_ptr)))) {
-          LOG_WARN("set column name failed", K(ret));
-      } else if (OB_FAIL(data_schema.add_column(*new_col))) {
-          LOG_WARN("add column failed", K(ret));
-      } else {
-          token_hash_col = data_schema.get_column_schema(new_col->get_column_id());
-          if (token_hash_col == nullptr) token_hash_col = new_col;
-          is_new_col = true;
-          LOG_INFO("succeed to generate token hash column", K(col_id));
+  char col_name_buf[OB_MAX_COLUMN_NAME_LENGTH] = {'\0'};
+  int64_t name_pos = 0;
+  bool col_exists = false;
+  if (OB_ISNULL(index_arg) ||
+      !share::schema::is_fts_index(index_arg->index_type_) ||
+      !data_schema.is_valid() ||
+      col_id == OB_INVALID_ID) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(ret), KPC(index_arg), K(data_schema), K(col_id));
+  } 
+  else if (OB_FAIL(construct_token_hash_col_name(index_arg,
+                                                 data_schema,
+                                                 col_name_buf,
+                                                 OB_MAX_COLUMN_NAME_LENGTH,
+                                                 name_pos,
+                                                 col_id))) {
+    LOG_WARN("failed to construct token hash col name", K(ret));
+  } 
+  else if (OB_FAIL(check_fts_gen_col(data_schema,
+                                     col_id,
+                                     col_name_buf,
+                                     name_pos,
+                                     col_exists))) {
+    LOG_WARN("check token hash col failed", K(ret));
+  } 
+  else if (!col_exists) {
+    ObColumnSchemaV2 column_schema;
+    SMART_VAR(char[OB_MAX_DEFAULT_VALUE_LENGTH], ft_expr_def) {
+      MEMSET(ft_expr_def, 0, sizeof(ft_expr_def));
+      ObCollationType collation_type = CS_TYPE_INVALID;
+      int64_t def_pos = 0;
+      if (OB_FAIL(ret)) {
+      } else if (OB_FAIL(databuff_printf(ft_expr_def,
+                                         OB_MAX_DEFAULT_VALUE_LENGTH,
+                                         def_pos,
+                                         "TOKEN_HASH("))) {
+        LOG_WARN("print generate expr definition prefix failed", K(ret));
       }
+      for (int64_t i = 0; OB_SUCC(ret) && i < index_arg->index_columns_.count(); ++i) {
+        const ObString &column_name = index_arg->index_columns_.at(i).column_name_;
+        const ObColumnSchemaV2 *col_schema = nullptr;
+        if (column_name.empty()) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("column name is empty", K(ret), K(column_name));
+        } else if (OB_ISNULL(col_schema = data_schema.get_column_schema(column_name))) {
+          ret = OB_ERR_KEY_COLUMN_DOES_NOT_EXITS;
+          LOG_USER_ERROR(OB_ERR_KEY_COLUMN_DOES_NOT_EXITS, column_name.length(),
+              column_name.ptr());
+        } else if (OB_FAIL(column_schema.add_cascaded_column_id(col_schema->get_column_id()))) {
+          LOG_WARN("add cascaded column to generated column failed", K(ret));
+        } else if (OB_FAIL(databuff_printf(ft_expr_def,
+                                           OB_MAX_DEFAULT_VALUE_LENGTH,
+                                           def_pos,
+                                           "`%s`, ",
+                                           col_schema->get_column_name()))) {
+          LOG_WARN("print column name to buffer failed", K(ret));
+        } 
+        else if (CS_TYPE_INVALID == collation_type) {
+          collation_type = col_schema->get_collation_type();
+        } else if (collation_type != col_schema->get_collation_type()) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "create fulltext index on columns with different collation");
+        }
+      }
+      if (OB_SUCC(ret)) {
+        if (def_pos >= 2) { 
+          def_pos -= 2; 
+        }
+        if (OB_FAIL(databuff_printf(ft_expr_def,
+                                    OB_MAX_DEFAULT_VALUE_LENGTH,
+                                    def_pos,
+                                    ")"))) {
+          LOG_WARN("print generate expr definition suffix failed", K(ret));
+        } else {
+          ObObj default_value;
+          default_value.set_varchar(ft_expr_def, static_cast<int32_t>(def_pos));
+          column_schema.set_rowkey_position(0); 
+          column_schema.set_index_position(0);  
+          column_schema.set_tbl_part_key_pos(0);
+          column_schema.set_tenant_id(data_schema.get_tenant_id());
+          column_schema.set_table_id(data_schema.get_table_id());
+          column_schema.set_column_id(col_id);
+          column_schema.add_column_flag(GENERATED_FTS_TOKEN_HASH_COLUMN_FLAG);
+          column_schema.add_column_flag(VIRTUAL_GENERATED_COLUMN_FLAG);       
+          column_schema.set_is_hidden(true);
+          column_schema.set_data_type(ObUInt64Type);
+          column_schema.set_collation_type(common::CS_TYPE_BINARY);
+          column_schema.set_charset_type(common::CHARSET_BINARY);
+          column_schema.set_prev_column_id(UINT64_MAX);
+          column_schema.set_next_column_id(UINT64_MAX);
+          ObSkipIndexColumnAttr skip_attr;
+          skip_attr.set_loose_min_max();
+          column_schema.set_skip_index_attr(skip_attr.get_packed_value());
+          if (OB_FAIL(column_schema.set_column_name(col_name_buf))) {
+            LOG_WARN("set column name failed", K(ret));
+          } else if (OB_FAIL(column_schema.set_orig_default_value(default_value))) {
+            LOG_WARN("set orig default value failed", K(ret));
+          } 
+          else if (OB_FAIL(column_schema.set_cur_default_value(default_value,
+                  column_schema.is_default_expr_v2_column()))) {
+            LOG_WARN("set current default value failed", K(ret));
+          } else if (OB_FAIL(data_schema.add_column(column_schema))) {
+            LOG_WARN("add token hash column schema to data table failed", K(ret));
+          } else {
+            token_hash_col = data_schema.get_column_schema(column_schema.get_column_id());
+            if (OB_ISNULL(token_hash_col)) {
+              ret = OB_ERR_UNEXPECTED;
+              LOG_WARN("generate token hash col failed", K(ret), KP(token_hash_col));
+            } else {
+              is_new_col = true;
+              LOG_INFO("succeed to generate token hash column", K(col_id), K(data_schema));
+            }
+          }
+        }
+      }
+    }
   }
   return ret;
 }
@@ -1736,6 +1806,38 @@ int ObFtsIndexBuilderUtil::construct_doc_length_col_name(
                                 name_pos,
                                 OB_DOC_LENGTH_COLUMN_NAME_PREFIX))) {
       LOG_WARN("fail to printf document length column", K(ret));
+    }
+    if (FAILEDx(databuff_printf(col_name_buf, buf_len, name_pos, "_%lu_%ld", col_id, ObTimeUtility::current_time()))){
+      LOG_WARN("fail to printf current time", K(ret));
+    }
+  }
+  return ret;
+}
+
+int ObFtsIndexBuilderUtil::construct_token_hash_col_name(
+    const ObCreateIndexArg *index_arg,
+    const ObTableSchema &data_schema,
+    char *col_name_buf,
+    const int64_t buf_len,
+    int64_t &name_pos,
+    const uint64_t col_id)
+{
+  int ret = OB_SUCCESS;
+  name_pos = 0;
+  if (OB_ISNULL(index_arg) ||
+      !share::schema::is_fts_index(index_arg->index_type_) ||
+      !data_schema.is_valid() ||
+      OB_ISNULL(col_name_buf)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(ret), KPC(index_arg), K(data_schema),
+        K(col_name_buf));
+  } else {
+    MEMSET(col_name_buf, 0, buf_len);
+    if (OB_FAIL(databuff_printf(col_name_buf,
+                                buf_len,
+                                name_pos,
+                                OB_TOKEN_HASH_COLUMN_NAME_PREFIX))) {
+      LOG_WARN("print generate column prefix name failed", K(ret));
     }
     if (FAILEDx(databuff_printf(col_name_buf, buf_len, name_pos, "_%lu_%ld", col_id, ObTimeUtility::current_time()))){
       LOG_WARN("fail to printf current time", K(ret));

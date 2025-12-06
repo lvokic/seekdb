@@ -665,6 +665,7 @@ ob_set_subtarget(ob_sql engine_expr
   engine/expr/ob_expr_to_outfile_row.cpp
   engine/expr/ob_expr_to_temporal_base.cpp
   engine/expr/ob_expr_to_type.cpp
+  engine/expr/ob_expr_token_hash.cpp
   engine/expr/ob_expr_trim.cpp
   engine/expr/ob_expr_truncate.cpp
   engine/expr/ob_expr_type_to_str.cpp

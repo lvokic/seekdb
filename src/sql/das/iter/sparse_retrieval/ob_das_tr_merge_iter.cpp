@@ -757,23 +757,18 @@ int ObDASTRMergeIter::set_children_iter_rangekey(const common::ObIArray<std::pai
     ObNewRange inv_idx_scan_range;
     const int64_t dim_iter_cnt = taat_mode_ ? 1 : query_tokens_.count();
     for (int64_t i = 0; OB_SUCC(ret) && i < dim_iter_cnt; ++i) {
-      for (int64_t j = 0; OB_SUCC(ret) && j < batch_size; ++j) {
-        if (OB_FAIL(gen_inv_idx_scan_one_range(query_tokens_[i],
-                                               virtual_rangekeys.at(j).first,
-                                               inv_idx_scan_range))) {
-          LOG_WARN("failed to generate inverted index scan range", K(ret),
-                   K(query_tokens_[i]), K(virtual_rangekeys.at(j).first));
-        } else if (FALSE_IT(inv_idx_scan_range.group_idx_ = group_idx)) {
-        } else if (OB_FAIL(inv_scan_params_[i]->key_ranges_.push_back(inv_idx_scan_range))) {
-          LOG_WARN("failed to push back lookup range", K(ret));
-        }
-      }
-
-      if (!ir_ctdef_->need_inv_idx_agg()) {
-      } else if (OB_FAIL(gen_inv_idx_scan_default_range(query_tokens_[i], inv_idx_scan_range))) {
+      if (OB_FAIL(gen_inv_idx_scan_default_range(query_tokens_[i], inv_idx_scan_range))) {
         LOG_WARN("failed to generate inverted index scan range", K(ret), K(query_tokens_[i]));
-      } else if (OB_FAIL(inv_agg_params_[i]->key_ranges_.push_back(inv_idx_scan_range))) {
+      } 
+      else if (FALSE_IT(inv_idx_scan_range.group_idx_ = group_idx)) {
+      } 
+      else if (OB_FAIL(inv_scan_params_[i]->key_ranges_.push_back(inv_idx_scan_range))) {
         LOG_WARN("failed to push back lookup range", K(ret));
+      }
+      if (OB_SUCC(ret) && ir_ctdef_->need_inv_idx_agg()) {
+          if (OB_FAIL(inv_agg_params_[i]->key_ranges_.push_back(inv_idx_scan_range))) {
+            LOG_WARN("failed to push back lookup range", K(ret));
+          }
       }
     }
   }

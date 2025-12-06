@@ -269,6 +269,7 @@
 #include "ob_expr_word_segment.h"
 #include "ob_expr_doc_id.h"
 #include "ob_expr_doc_length.h"
+#include "ob_expr_token_hash.h"
 #include "ob_expr_bm25.h"
 #include "ob_expr_lock_func.h"
 #include "ob_expr_extract_cert_expired_time.h"
@@ -1347,6 +1348,7 @@ static ObExpr::EvalFunc g_expr_eval_functions[] = {
   ObExprVectorCosineSimilarity::calc_cosine_similarity,                /* 872 */
   ObExprVectorIPSimilarity::calc_ip_similarity,                        /* 873 */
   ObExprVectorSimilarity::calc_similarity,                             /* 874 */
+  ObExprTokenHash::eval_token_hash,
 };
 
 static ObExpr::EvalBatchFunc g_expr_eval_batch_functions[] = {

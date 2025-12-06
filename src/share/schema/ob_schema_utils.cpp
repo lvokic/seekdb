@@ -155,6 +155,8 @@ int ObSchemaUtils::cascaded_generated_column(ObTableSchema &table_schema,
         column.add_column_flag(GENERATED_FTS_WORD_COUNT_COLUMN_FLAG);
       } else if (T_FUN_SYS_DOC_LENGTH == root_expr_type) {
         column.add_column_flag(GENERATED_FTS_DOC_LENGTH_COLUMN_FLAG);
+      } else if (T_FUN_SYS_TOKEN_HASH == root_expr_type) {
+        column.add_column_flag(GENERATED_FTS_TOKEN_HASH_COLUMN_FLAG);
       } else if (T_FUN_SYS_HYBRID_VEC_CHUNK == root_expr_type) {
         column.add_column_flag(GENERATED_HYBRID_VEC_CHUNK_COLUMN_FLAG);
       } else if (T_FUN_SYS_SPATIAL_CELLID == root_expr_type || T_FUN_SYS_SPATIAL_MBR == root_expr_type) {

@@ -13,6 +13,10 @@ INSERT INTO Item (base_id, docid_col, fulltext_col)
            ('124', '215s', 'Another example of fulltext content to be indexed.'),
            ('125', '216s', 'Fulltext search capabilities are important for many applications.');
 
+
+INSERT INTO Item (base_id, docid_col, fulltext_col)
+    VALUES ('123', '214s', 'This is a sample fulltext content for testing purposes.');
+
 CREATE FULLTEXT INDEX idx_fulltext_col ON Item(fulltext_col);
 
 SELECT
@@ -42,7 +46,12 @@ LIMIT 5;
 
 explain SELECT * FROM test_insert_en WHERE MATCH(fulltext_col) AGAINST('OceanBaseSuperTestWord' IN NATURAL LANGUAGE MODE) limit 3;
 
-SELECT * FROM item WHERE MATCH(fulltext_col) AGAINST('sample' IN NATURAL LANGUAGE MODE);
+explain SELECT * FROM item WHERE MATCH(fulltext_col) AGAINST('sample' IN NATURAL LANGUAGE MODE);
+
+explian SELECT /*+ INDEX(item idx_fulltext_col) */ 
+  id, fulltext_col 
+FROM item
+WHERE MATCH(fulltext_col) AGAINST('sample' IN NATURAL LANGUAGE MODE);
 
 #!/bin/bash
 
@@ -64,16 +73,51 @@ cd Flamegraph
 echo "Flamegraph has been generated: flamegraph.svg"
 
 kill -9 $(pidof observer)
-bash build.sh debug -DOB_USE_CCACHE=ON --init --make -j6
+bash build.sh debug -DOB_USE_CCACHE=ON --init --make -j4
 cp build_debug/src/observer/observer ~/seekdb/bin
 
 ./bin/observer
 ./deps/3rd/u01/obclient/bin/obclient -h127.0.0.1 -P2881 -uroot -Dtest -A
 
+DROP INDEX idx_fulltext_col ON item;
 
 DROP INDEX ft_fulltext ON test_insert_en;
 create fulltext index ft_fulltext on test_insert_en(fulltext_col);
 
 b ObFtsIndexBuilderUtil::set_fts_index_table_columns
-
+bObSRDaaTIterImpl::fill_merge_heap
 b ObDASDomainUtils::generate_fulltext_word_rows
+
+SELECT table_id, table_name, tablet_id
+FROM oceanbase.__all_table 
+WHERE table_name = 'item'
+AND database_id = (SELECT database_id FROM oceanbase.__all_database WHERE database_name = 'test');
+
+
+SELECT table_id, table_name 
+FROM oceanbase.__all_table 
+WHERE table_name = 'item';
+
+SELECT table_id, table_name, index_type 
+FROM oceanbase.__all_table 
+WHERE data_table_id = 500009;
+
+SELECT tablet_id, ls_id, svr_ip 
+FROM oceanbase.__all_virtual_tablet_meta_table 
+WHERE table_id = 500011; -- 使用上一步得到的索引表 ID
+
+SELECT 
+    table_id, 
+    tablet_id, 
+    ls_id 
+FROM oceanbase.__all_tablet_to_ls 
+WHERE table_id IN (500010, 500011);
+
+
+# insert_ctdef_ 里面包含了 table_id 信息
+# 注意：具体成员变量路径可能因版本略有不同，常用的是下面这个
+b oceanbase::sql::ObDASInsertOp::insert_rows
+cond 1 this->insert_ctdef_->table_param_.data_table_.table_id_ == 500007
+
+grep -a -C 5 "YB427F000001-00064530637D82FD-0-0" observer.log.wf
+grep -a "ob_table_scan_op.cpp" observer.log | grep "init_ddl_column_checksum" | grep "ret=-4002" | tail -n 5

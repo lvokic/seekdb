@@ -2,7 +2,7 @@
 
 set -e  # 遇到错误立即退出
 
-TARGET_DIRS=("store" "run" "etc")
+TARGET_DIRS=("store" "run" "etc" "log")
 
 echo "开始删除以下目录："
 printf "  - %s\n" "${TARGET_DIRS[@]}"

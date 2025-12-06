@@ -262,6 +262,13 @@ private:
       const int64_t buf_len,
       int64_t &name_pos,
       const uint64_t col_id);
+  static int construct_token_hash_col_name(
+      const obrpc::ObCreateIndexArg *index_arg,
+      const ObTableSchema &data_schema,
+      char *col_name_buf,
+      const int64_t buf_len,
+      int64_t &name_pos,
+      const uint64_t col_id);
   static int check_fts_gen_col(
       const ObTableSchema &data_schema,
       const uint64_t col_id,
@@ -284,10 +291,6 @@ private:
       ObIArray<const ObColumnSchemaV2 *> &cols,
       const ObColumnSchemaV2 *existing_col,
       ObColumnSchemaV2 *generated_col);
-  static int add_token_hash_rowkey_column(
-      const ObTableSchema &data_schema,
-      common::ObRowDesc &row_desc,
-      share::schema::ObTableSchema &index_schema);
   static int get_index_column_ids(
       const ObTableSchema &data_schema,
       const obrpc::ObCreateIndexArg &arg,

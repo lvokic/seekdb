@@ -4080,7 +4080,7 @@ int ObTableScanOp::fill_generated_fts_cols(blocksstable::ObDatumRow *row)
   int ret = OB_SUCCESS;
   const ObObjDatumMapType *types = MY_SPEC.is_fts_index_aux_ ? ObFTIndexRowCache::FTS_INDEX_TYPES : ObFTIndexRowCache::FTS_DOC_WORD_TYPES;
   const ObExprOperatorType *expr_types = MY_SPEC.is_fts_index_aux_ ? ObFTIndexRowCache::FTS_INDEX_EXPR_TYPE : ObFTIndexRowCache::FTS_DOC_WORD_EXPR_TYPE;
-  const int64_t storage_offset = MY_SPEC.is_fts_index_aux_ ? 1 : 0;
+  const int64_t storage_offset = 0;
   const int64_t storage_col_cnt = MY_SPEC.is_fts_index_aux_
       ? share::ObFtsIndexBuilderUtil::OB_FTS_INDEX_TABLE_COLUMN_CNT
       : share::ObFtsIndexBuilderUtil::OB_FTS_DOC_WORD_TABLE_COLUMN_CNT;
@@ -4117,7 +4117,8 @@ int ObTableScanOp::get_output_fts_col_expr_by_type(
   if (OB_UNLIKELY(T_FUN_SYS_WORD_SEGMENT != type
                && T_FUN_SYS_DOC_ID != type
                && T_FUN_SYS_WORD_COUNT != type
-               && T_FUN_SYS_DOC_LENGTH != type)) {
+               && T_FUN_SYS_DOC_LENGTH != type
+               && T_FUN_SYS_TOKEN_HASH != type)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid fts column expr type", K(ret), "type", get_type_name(type));
   } else if (T_FUN_SYS_DOC_ID == type) {

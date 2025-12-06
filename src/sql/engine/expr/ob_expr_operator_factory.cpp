@@ -180,6 +180,7 @@
 #include "sql/engine/expr/ob_expr_part_id.h"
 #include "sql/engine/expr/ob_expr_timestamp_add.h"
 #include "sql/engine/expr/ob_expr_des_hex_str.h"
+#include "sql/engine/expr/ob_expr_token_hash.h"
 #include "sql/engine/expr/ob_expr_doc_id.h"
 #include "sql/engine/expr/ob_expr_doc_length.h"
 #include "sql/engine/expr/ob_expr_word_segment.h"
@@ -819,6 +820,7 @@ void ObExprOperatorFactory::register_expr_operators()
     REG_OP(ObExprDocLength);
     REG_OP(ObExprWordSegment);
     REG_OP(ObExprWordCount);
+    REG_OP(ObExprTokenHash);
     REG_OP(ObExprObjAccess);
     REG_OP(ObExprEnumToStr);
     REG_OP(ObExprSetToStr);
@@ -1319,6 +1321,8 @@ void ObExprOperatorFactory::get_function_alias_name(const ObString &origin_name,
       alias_name = ObString::make_string(N_WORD_COUNT);
     } else if (0 == origin_name.case_compare("DOC_LENGTH")) {
       alias_name = ObString::make_string(N_DOC_LENGTH);
+    } else if (0 == origin_name.case_compare("TOKEN_HASH")) {
+      alias_name = ObString::make_string(N_TOKEN_HASH);
     } else if (0 == origin_name.case_compare("inet_ntoa")) {
       // inet_ntoa is synonym for int2ip
       alias_name = ObString::make_string(N_INT2IP);
