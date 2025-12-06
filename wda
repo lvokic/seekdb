@@ -46,11 +46,11 @@ LIMIT 5;
 
 explain SELECT * FROM test_insert_en WHERE MATCH(fulltext_col) AGAINST('OceanBaseSuperTestWord' IN NATURAL LANGUAGE MODE) limit 3;
 
-explain SELECT * FROM item WHERE MATCH(fulltext_col) AGAINST('sample' IN NATURAL LANGUAGE MODE);
+explain SELECT * FROM test_insert_en WHERE MATCH(fulltext_col) AGAINST('sample' IN NATURAL LANGUAGE MODE);
 
-explian SELECT /*+ INDEX(item idx_fulltext_col) */ 
+explain SELECT /*+ INDEX(test_insert_en ft_fulltext) */ 
   id, fulltext_col 
-FROM item
+FROM test_insert_en
 WHERE MATCH(fulltext_col) AGAINST('sample' IN NATURAL LANGUAGE MODE);
 
 #!/bin/bash

@@ -19725,21 +19725,22 @@ int ObJoinOrder::get_range_of_query_tokens(ObIArray<ObConstRawExpr*> &query_toke
                                            ObIArray<ColumnItem> &range_columns,
                                            ObQueryRangeProvider *&query_range)
 {
-  // jinmao TODO: change to directly construct query range, do not generate IN expression indirectly to extract
   int ret = OB_SUCCESS;
   ObColumnRefRawExpr *word_col = NULL;
+  ObColumnRefRawExpr *hash_col = NULL;
   ObOpRawExpr *in_expr = NULL;
   ObOpRawExpr *in_list_expr = NULL;
-  ObSEArray<ObRawExpr*,2> tmp_range_exprs;
+  ObSEArray<ObRawExpr*, 2> tmp_range_exprs;
   const ParamStore *params = NULL;
-  // find word segment column on fts index
-  for (int64_t i = 0; OB_SUCC(ret) && OB_ISNULL(word_col) && i < range_columns.count(); i++) {
+  for (int64_t i = 0; OB_SUCC(ret) && i < range_columns.count(); i++) {
     const ObColumnSchemaV2 *col_schema = index_schema.get_column_schema(range_columns.at(i).column_id_);
     if (OB_ISNULL(col_schema)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("get unexpected null", K(col_schema), K(ret));
     } else if (col_schema->is_word_segment_column()) {
       word_col = range_columns.at(i).expr_;
+    } else if (col_schema->is_token_hash_column() || (index_schema.is_fts_index_aux() && i == 0)) {
+      hash_col = range_columns.at(i).expr_;
     }
   }
 
@@ -19749,28 +19750,79 @@ int ObJoinOrder::get_range_of_query_tokens(ObIArray<ObConstRawExpr*> &query_toke
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("failed to get word segment column", K(ret));
   } else if (!query_tokens.empty()) {
-    if (OB_FAIL(OPT_CTX.get_exec_ctx()->get_expr_factory()->create_raw_expr(T_OP_ROW, in_list_expr))) {
-      LOG_WARN("create to_type expr failed", K(ret));
-    } else if (OB_FAIL(OPT_CTX.get_exec_ctx()->get_expr_factory()->create_raw_expr(T_OP_IN, in_expr))) {
-      LOG_WARN("create to_type expr failed", K(ret));
-    } else if (OB_ISNULL(in_list_expr) || OB_ISNULL(in_expr)) {
+    if (OB_FAIL(OPT_CTX.get_exec_ctx()->get_expr_factory()->create_raw_expr(T_OP_IN, in_expr))) {
+      LOG_WARN("create in expr failed", K(ret));
+    } else if (OB_FAIL(OPT_CTX.get_exec_ctx()->get_expr_factory()->create_raw_expr(T_OP_ROW, in_list_expr))) {
+      LOG_WARN("create row expr failed", K(ret));
+    } else if (OB_ISNULL(in_expr) || OB_ISNULL(in_list_expr)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("get unexpected null", K(in_list_expr), K(in_expr), K(ret));
     } else if (OB_FAIL(in_list_expr->init_param_exprs(query_tokens.count()))) {
       LOG_WARN("failed to init param exprs", K(ret));
     } else {
-      for (int64_t i = 0; OB_SUCC(ret) && i < query_tokens.count(); i++) {
-        if (OB_FAIL(in_list_expr->add_param_expr(query_tokens.at(i)))) {
-          LOG_WARN("failed to add param expr", K(ret));
+      if (OB_NOT_NULL(hash_col)) {
+        ObOpRawExpr *left_row_expr = NULL;
+        if (OB_FAIL(OPT_CTX.get_exec_ctx()->get_expr_factory()->create_raw_expr(T_OP_ROW, left_row_expr))) {
+           LOG_WARN("create left row expr failed", K(ret));
+        } else if (OB_FAIL(left_row_expr->init_param_exprs(2))) {
+           LOG_WARN("init left row params failed", K(ret));
+        } else if (OB_FAIL(left_row_expr->add_param_expr(hash_col))) {
+           LOG_WARN("add hash col failed", K(ret));
+        } else if (OB_FAIL(left_row_expr->add_param_expr(word_col))) {
+           LOG_WARN("add word col failed", K(ret));
+        }
+        for (int64_t i = 0; OB_SUCC(ret) && i < query_tokens.count(); i++) {
+          ObConstRawExpr *token_expr = query_tokens.at(i);
+          uint64_t hash_val = 0;
+          ObConstRawExpr *hash_expr = NULL;
+          ObOpRawExpr *right_row_expr = NULL;
+          if (OB_FAIL(share::ObFtsIndexBuilderUtil::calc_token_hash(
+                  hash_col->get_result_type().get_obj_meta(), 
+                  token_expr->get_value().get_string(), 
+                  hash_val))) {
+            LOG_WARN("failed to calc token hash", K(ret));
+          } 
+          else if (OB_FAIL(ObRawExprUtils::build_const_int_expr(*OPT_CTX.get_exec_ctx()->get_expr_factory(),
+                                                                ObUInt64Type, hash_val, hash_expr))) {
+            LOG_WARN("failed to build hash const expr", K(ret));
+          } 
+          else if (OB_FAIL(OPT_CTX.get_exec_ctx()->get_expr_factory()->create_raw_expr(T_OP_ROW, right_row_expr))) {
+            LOG_WARN("create right row expr failed", K(ret));
+          } else if (OB_FAIL(right_row_expr->init_param_exprs(2))) {
+            LOG_WARN("init right row params failed", K(ret));
+          } else if (OB_FAIL(right_row_expr->add_param_expr(hash_expr))) {
+            LOG_WARN("add hash val failed", K(ret));
+          } else if (OB_FAIL(right_row_expr->add_param_expr(token_expr))) {
+            LOG_WARN("add token val failed", K(ret));
+          } 
+          else if (OB_FAIL(in_list_expr->add_param_expr(right_row_expr))) {
+            LOG_WARN("failed to add param expr", K(ret));
+          }
+        }
+        if (OB_SUCC(ret)) {
+          if (OB_FAIL(in_expr->set_param_exprs(left_row_expr, in_list_expr))) {
+             LOG_WARN("failed to set param exprs", K(ret));
+          }
         }
       }
-      if (OB_FAIL(ret)) {
-      } else if (OB_FAIL(in_expr->set_param_exprs(word_col, in_list_expr))) {
-        LOG_WARN("failed to set param exprs", K(ret));
-      } else if (OB_FAIL(in_expr->formalize(OPT_CTX.get_exec_ctx()->get_my_session()))) {
-        LOG_WARN("failed to formalize expr", K(ret));
-      } else if (OB_FAIL(tmp_range_exprs.push_back(in_expr))) {
-        LOG_WARN("failed to push back range expr", K(ret));
+      else {
+        for (int64_t i = 0; OB_SUCC(ret) && i < query_tokens.count(); i++) {
+          if (OB_FAIL(in_list_expr->add_param_expr(query_tokens.at(i)))) {
+            LOG_WARN("failed to add param expr", K(ret));
+          }
+        }
+        if (OB_SUCC(ret)) {
+          if (OB_FAIL(in_expr->set_param_exprs(word_col, in_list_expr))) {
+            LOG_WARN("failed to set param exprs", K(ret));
+          }
+        }
+      }
+      if (OB_SUCC(ret)) {
+        if (OB_FAIL(in_expr->formalize(OPT_CTX.get_exec_ctx()->get_my_session()))) {
+          LOG_WARN("failed to formalize expr", K(ret));
+        } else if (OB_FAIL(tmp_range_exprs.push_back(in_expr))) {
+          LOG_WARN("failed to push back range expr", K(ret));
+        }
       }
     }
   } else {
