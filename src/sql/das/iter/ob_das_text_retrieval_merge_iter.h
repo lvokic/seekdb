@@ -181,6 +181,7 @@ protected:
   int64_t input_row_cnt_;
   int64_t output_row_cnt_;
   ObDocIdExt default_docid_; // for function lookup
+  ObDocIdExt projected_docid_;
   bool force_return_docid_; // for function lookup
   bool doc_cnt_calculated_;
   bool doc_cnt_iter_acquired_;

@@ -227,6 +227,8 @@ private:
   bool block_max_inited_;
   bool in_shallow_status_;
   bool is_inited_;
+  ObTableScanParam hash_only_param_;
+  common::ObSEArray<common::ObNewRange, 1> hash_only_ranges_;
   DISALLOW_COPY_AND_ASSIGN(ObTextRetrievalBlockMaxIter);
 };
 

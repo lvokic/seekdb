@@ -408,9 +408,9 @@ int ObBlockMaxScoreIterator::calc_domain_id_range(const ObDatumRow &agg_row, con
         } else if (OB_FAIL(dim_cmp_(rowkey_dim_datum, scan_dim_datum, cmp_ret))) {
           LOG_WARN("fail to compare dim", K(ret), K(scan_dim_obj), K(rowkey_dim_datum));
         } else if (OB_UNLIKELY(cmp_ret < 0)) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("unexpected endkey dimension smaller than scan dimension",
-              K(ret), K(cmp_ret), K(rowkey_dim_datum), K(scan_dim_datum));
+          // [ADD] 如果是小于，说明当前 Block 的 EndKey 还没覆盖到当前维度的结束
+          // 这通常是因为 Hash 碰撞或者前缀压缩导致的，我们应该保守地使用 Block 的 Max DocID
+          max_score_tuple_.max_domain_id_ = &max_datum;
         } else {
           if (cmp_ret > 0) {
             // reached the end of the dimension

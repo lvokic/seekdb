@@ -1,0 +1,45 @@
+
+CREATE TABLE Item (
+        id BIGINT AUTO_INCREMENT,
+        base_id VARCHAR(255) NOT NULL,
+        docid_col VARCHAR(255) NOT NULL,
+        fulltext_col LONGTEXT
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO Item (base_id, docid_col, fulltext_col)
+    VALUES ('123', '214s', 'This is a sample fulltext content for testing purposes.'),
+           ('124', '215s', 'Another example of fulltext content to be indexed.'),
+           ('125', '216s', 'Fulltext search capabilities are important for many applications.');
+
+CREATE FULLTEXT INDEX idx_fulltext_col ON Item(fulltext_col);
+
+SELECT
+    id,
+    fulltext_col,
+    MATCH(fulltext_col) AGAINST('sample 1' IN NATURAL LANGUAGE MODE) AS text_score
+FROM Item
+WHERE MATCH(fulltext_col) AGAINST('sample 1' IN NATURAL LANGUAGE MODE)
+ORDER BY text_score DESC
+LIMIT 2;
+
+SELECT
+    id,
+    fulltext_col,
+    MATCH(fulltext_col) AGAINST('sample' IN NATURAL LANGUAGE MODE) AS text_score
+FROM test_insert_en
+WHERE MATCH(fulltext_col) AGAINST('sample' IN NATURAL LANGUAGE MODE)
+ORDER BY text_score DESC
+LIMIT 2;
+
+b ObFtsIndexBuilderUtil::set_fts_index_table_columns
+b ObPartitionPreSplit::get_global_index_pre_split_schema_if_need
+b ObCreateIndexResolver::set_table_option_to_stmt
+b ObIndexBuilderUtil::set_index_table_columns
+b ObDDLResolver::generate_global_index_schema
+b ObDDLResolver::do_generate_global_index_schema
+
+kill -9 $(pidof observer)
+bash build.sh debug -DOB_USE_CCACHE=ON --init --make -j6
+cp build_debug/src/observer/observer ~/seekdb/bin
+
+./deps/3rd/u01/obclient/bin/obclient -h127.0.0.1 -P2881 -uroot -Dtest -A

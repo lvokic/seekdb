@@ -22,6 +22,7 @@
 #include "ob_das_text_retrieval_eval_node.h"
 #include "ob_das_text_retrieval_iter.h"
 #include "sql/das/ob_das_ir_define.h"
+#include "share/text_analysis/ob_text_analyzer.h"
 
 namespace oceanbase
 {
@@ -108,6 +109,8 @@ ObDASTextRetrievalMergeIter::ObDASTextRetrievalMergeIter()
     limit_param_(),
     input_row_cnt_(0),
     output_row_cnt_(0),
+    default_docid_(),
+    projected_docid_(),
     force_return_docid_(false),
     doc_cnt_calculated_(false),
     doc_cnt_iter_acquired_(false),
@@ -242,65 +245,31 @@ int ObDASTextRetrievalMergeIter::build_query_tokens(const ObDASIRScanCtDef *ir_c
       }
     }
   } else {
-    // TODO: FTParseHelper currently does not support deduplicate tokens
-    //       We should abstract such universal analyse functors into utility structs
-    const ObString &search_text_string = search_text_datum->get_string();
-    const ObString &parser_name = ir_ctdef->get_inv_idx_scan_ctdef()->table_param_.get_parser_name();
-    const ObString &parser_properties = ir_ctdef->get_inv_idx_scan_ctdef()->table_param_.get_parser_property();
-
-    const ObObjMeta &meta = search_text->obj_meta_;
-    int64_t doc_length = 0;
-    storage::ObFTParseHelper tokenize_helper;
-    common::ObSEArray<ObFTWord, 16> tokens;
-    hash::ObHashMap<ObFTWord, int64_t> token_map;
-    const int64_t ft_word_bkt_cnt = MAX(search_text_string.length() / 10, 2);
-    if (OB_FAIL(tokenize_helper.init(&alloc, parser_name, parser_properties))) {
-      LOG_WARN("failed to init tokenize helper", K(ret));
-    } else if (OB_FAIL(token_map.create(ft_word_bkt_cnt, common::ObMemAttr(MTL_ID(), "FTWordMap")))) {
-      LOG_WARN("failed to create token map", K(ret));
-    } else if (OB_FAIL(tokenize_helper.segment(
-                           meta,
-                           search_text_string.ptr(),
-                           search_text_string.length(),
-                           doc_length,
-                           token_map))) {
-      LOG_WARN("failed to segment");
-    } else {
-      for (hash::ObHashMap<ObFTWord, int64_t>::const_iterator iter = token_map.begin();
-          OB_SUCC(ret) && iter != token_map.end();
-          ++iter) {
-        const ObFTWord &token = iter->first;
-        ObString token_string;
-        if (OB_FAIL(ob_write_string(alloc, token.get_word().get_string(), token_string))) {
-          LOG_WARN("failed to deep copy query token", K(ret));
-        } else if (OB_FAIL(query_tokens.push_back(token_string))) {
-          LOG_WARN("failed to append query token", K(ret));
-        }
-      }
-    }
-// TODO: try use this interface instead
-/*
     share::ObITokenStream *token_stream = nullptr;
     share::ObTextAnalysisCtx query_analysis_ctx;
     query_analysis_ctx.need_grouping_ = true;
     query_analysis_ctx.filter_stopword_ = true;
     query_analysis_ctx.cs_ = common::ObCharset::get_charset(search_text->obj_meta_.get_collation_type());
     share::ObEnglishTextAnalyzer query_analyzer;
-    if (OB_FAIL(query_analyzer.init(query_analysis_ctx, token_analyze_alloc))) {
+    if (OB_ISNULL(query_analysis_ctx.cs_)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("invalid charset info", K(ret), K(search_text->obj_meta_));
+    } else if (OB_FAIL(query_analyzer.init(query_analysis_ctx, alloc))) {
       LOG_WARN("failed to init query text analyzer", K(ret));
     } else if (OB_FAIL(query_analyzer.analyze(*search_text_datum, token_stream))) {
       LOG_WARN("failed to analyze search text", K(ret), K(query_analysis_ctx), KPC(search_text_datum));
+    } else if (OB_ISNULL(token_stream)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("token stream is null", K(ret));
     }
     while (OB_SUCC(ret)) {
       ObDatum token;
-      ObString token_string;
       if (OB_FAIL(token_stream->get_next(token))) {
         if (OB_UNLIKELY(OB_ITER_END != ret)) {
           LOG_WARN("failed to get next query token", K(ret));
         }
-      } else if (OB_FAIL(ob_write_string(token_analyze_alloc, token.get_string(), token_string))) {
-        LOG_WARN("failed to deep copy query token", K(ret));
-      } else if (OB_FAIL(query_tokens_.push_back(token_string))) {
+      } 
+      if (OB_FAIL(query_tokens.push_back(token.get_string()))) {
         LOG_WARN("failed to append query token", K(ret));
       }
     }
@@ -310,7 +279,6 @@ int ObDASTextRetrievalMergeIter::build_query_tokens(const ObDASIRScanCtDef *ir_c
     } else {
       ret = OB_SUCCESS;
     }
-*/
     LOG_DEBUG("tokenized text query:", K(ret), KPC(search_text_datum), K(query_tokens));
   }
   return ret;
@@ -582,11 +550,8 @@ int ObDASTextRetrievalMergeIter::check_and_prepare()
 int ObDASTextRetrievalMergeIter::project_result(const ObDocIdExt &docid, const double relevance)
 {
   int ret = OB_SUCCESS;
-  // TODO: usage of doc id column is somehow weird here, since in single token retrieval iterators,
-  //       we use doc id expr to scan doc_id column for scan document. But here after DaaT processing, we use this expr
-  //       to record current disjunctive documents. Though current implementation can make sure lifetime is
-  //       safe, but it's tricky and indirect to read.
-  // P.S we cannot allocate multiple doc id expr at cg for every query token since tokenization now is an runtime operation
+  projected_docid_ = docid;
+  const ObDocIdExt &docid_ref = projected_docid_;
   ObExpr *doc_id_col = ir_ctdef_->inv_scan_domain_id_col_;
   ObEvalCtx *eval_ctx = ir_rtdef_->eval_ctx_;
   if (OB_ISNULL(doc_id_col) || OB_ISNULL(eval_ctx)) {
@@ -595,7 +560,7 @@ int ObDASTextRetrievalMergeIter::project_result(const ObDocIdExt &docid, const d
         K(ret), KP(doc_id_col), KP(eval_ctx));
   } else {
     ObDatum &doc_id_proj_datum = doc_id_col->locate_datum_for_write(*eval_ctx);
-    set_datum_func_(doc_id_proj_datum, docid);
+    set_datum_func_(doc_id_proj_datum, docid_ref);
     if (ir_ctdef_->need_proj_relevance_score()) {
       ObExpr *relevance_proj_col = ir_ctdef_->relevance_proj_col_;
       if (OB_ISNULL(relevance_proj_col)) {
@@ -606,7 +571,7 @@ int ObDASTextRetrievalMergeIter::project_result(const ObDocIdExt &docid, const d
         relevance_proj_datum.set_double(relevance);
       }
     }
-    LOG_DEBUG("project one fulltext search result", K(ret), K(docid), K(relevance));
+    LOG_DEBUG("project one fulltext search result", K(ret), K(docid_ref), K(relevance));
   }
   return ret;
 }
@@ -614,11 +579,6 @@ int ObDASTextRetrievalMergeIter::project_result(const ObDocIdExt &docid, const d
 int ObDASTextRetrievalMergeIter::project_relevance(const ObDocIdExt &docid, const double relevance)
 {
   int ret = OB_SUCCESS;
-  // TODO: usage of doc id column is somehow weird here, since in single token retrieval iterators,
-  //       we use doc id expr to scan doc_id column for scan document. But here after DaaT processing, we use this expr
-  //       to record current disjunctive documents. Though current implementation can make sure lifetime is
-  //       safe, but it's tricky and indirect to read.
-  // P.S we cannot allocate multiple doc id expr at cg for every query token since tokenization now is an runtime operation
   ObExpr *doc_id_col = ir_ctdef_->inv_scan_domain_id_col_;
   ObEvalCtx *eval_ctx = ir_rtdef_->eval_ctx_;
   if (OB_ISNULL(doc_id_col) || OB_ISNULL(eval_ctx)) {
@@ -626,6 +586,15 @@ int ObDASTextRetrievalMergeIter::project_relevance(const ObDocIdExt &docid, cons
     LOG_WARN("unexpected nullptr to relevance proejction column",
         K(ret), KP(doc_id_col), KP(eval_ctx));
   } else {
+    if (doc_id_col->is_batch_result()) {
+      ObDatum *doc_id_proj_datum = doc_id_col->locate_batch_datums(*eval_ctx);
+      set_datum_func_(doc_id_proj_datum[next_written_idx_], docid);
+    } else {
+      ObEvalCtx::BatchInfoScopeGuard guard(*eval_ctx);
+      guard.set_batch_idx(next_written_idx_);
+      ObDatum &doc_id_proj_datum = doc_id_col->locate_datum_for_write(*eval_ctx);
+      set_datum_func_(doc_id_proj_datum, docid);
+    }
     cache_doc_ids_[next_written_idx_] = docid;
     if (ir_ctdef_->need_proj_relevance_score()) {
       ObExpr *relevance_proj_col = ir_ctdef_->relevance_proj_col_;
@@ -1288,28 +1257,32 @@ int ObDASTRTaatIter::fill_chunk_store_by_tr_iter()
     }
 
     int64_t capacity = ir_rtdef_->eval_ctx_->max_batch_size_;
-    sql::ObBitVector **skips = nullptr;
+    uint16_t *part_selector_sizes = nullptr;
+    uint16_t *part_selectors = nullptr;
+    sql::ObBitVector *fake_skip = nullptr;
     void *buf = nullptr;
     if (OB_SUCC(ret) && ir_ctdef_->inv_scan_domain_id_col_->is_batch_result()) {
-      if (nullptr == skips && OB_SUCC(ret)) {
-        if (OB_ISNULL(buf = mem_context_->get_arena_allocator().alloc(sizeof(sql::ObBitVector *) * hash_map_size_))) {
+      if (OB_ISNULL(buf = mem_context_->get_arena_allocator().alloc(sizeof(uint16_t) * hash_map_size_))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_WARN("failed to allocate selector size buffer", K(ret), K(hash_map_size_));
+      } else {
+        part_selector_sizes = static_cast<uint16_t *>(buf);
+      }
+      const int64_t selector_array_cnt = hash_map_size_ * capacity;
+      if (OB_SUCC(ret)) {
+        if (OB_ISNULL(buf = mem_context_->get_arena_allocator().alloc(sizeof(uint16_t) * selector_array_cnt))) {
           ret = OB_ALLOCATE_MEMORY_FAILED;
-          LOG_WARN("failed to allocate enough memory", K(sizeof(sql::ObBitVector *) * hash_map_size_), K(ret));
+          LOG_WARN("failed to allocate selector buffer", K(ret), K(selector_array_cnt));
         } else {
-          skips = static_cast<sql::ObBitVector **>(buf);
+          part_selectors = static_cast<uint16_t *>(buf);
         }
       }
-      if (OB_SUCC(ret) && ir_ctdef_->inv_scan_domain_id_col_->is_batch_result()) {
-        for (int64_t i = 0; OB_SUCC(ret) && i < hash_map_size_; ++i) {
-          sql::ObBitVector *skip = nullptr;
-          if (OB_ISNULL(skip = to_bit_vector(mem_context_->get_arena_allocator().alloc(ObBitVector::memory_size(capacity))))) {
-            ret = OB_ALLOCATE_MEMORY_FAILED;
-            LOG_WARN("failed to allocate enough memory", K(capacity), K(ret));
-          } else {
-            skip->init(capacity);
-            skips[i] = skip;
-          }
-
+      if (OB_SUCC(ret)) {
+        if (OB_ISNULL(fake_skip = to_bit_vector(mem_context_->get_arena_allocator().alloc(ObBitVector::memory_size(capacity))))) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+          LOG_WARN("failed to allocate fake skip", K(ret), K(capacity));
+        } else {
+          fake_skip->init(capacity);
         }
       }
     }
@@ -1330,10 +1303,7 @@ int ObDASTRTaatIter::fill_chunk_store_by_tr_iter()
             }
           }
           if (OB_SUCC(ret)) {
-            // handle skips // TODO: use batch skip like hashjoin
-            for (int64_t i = 0; i < hash_map_size_; ++i) {
-              skips[i]->set_all(capacity);
-            }
+            MEMSET(part_selector_sizes, 0, sizeof(uint16_t) * hash_map_size_);
             for (int64_t i = 0; OB_SUCC(ret) && i < count; ++i) {
               ObExpr *doc_id_expr = ir_ctdef_->inv_scan_domain_id_col_;
               const ObDatum &doc_id_datum = doc_id_expr->locate_expr_datum(*ir_rtdef_->get_inv_idx_scan_rtdef()->eval_ctx_, i);
@@ -1341,23 +1311,35 @@ int ObDASTRTaatIter::fill_chunk_store_by_tr_iter()
                 ret = OB_ERR_UNEXPECTED;
                 LOG_WARN("unexpected nullptr", K(ret));
               } else {
-                uint64_t partition = murmurhash(doc_id_datum.ptr_, doc_id_datum.len_, 0) % hash_map_size_;
-                skips[partition]->unset(i);
+                const uint64_t partition = murmurhash(doc_id_datum.ptr_, doc_id_datum.len_, 0) % hash_map_size_;
+                const int64_t part_idx = static_cast<int64_t>(partition);
+                if (OB_UNLIKELY(part_selector_sizes[part_idx] >= capacity)) {
+                  ret = OB_ERR_UNEXPECTED;
+                  LOG_WARN("selector overflow", K(ret), K(part_idx), K(capacity), K(count));
+                } else {
+                  const int64_t selector_offset = part_idx * capacity + part_selector_sizes[part_idx];
+                  part_selectors[selector_offset] = static_cast<uint16_t>(i);
+                  part_selector_sizes[part_idx]++;
+                }
               }
             }
             int64_t check_count = 0;
             // fill the datum_stores_
             for (int64_t i = 0; OB_SUCC(ret) && i < hash_map_size_; ++i) {
-              int64_t stored_rows_count = 0;
-              if (OB_FAIL(datum_stores_[i]->add_batch(exprs,
+              const int64_t selector_cnt = part_selector_sizes[i];
+              if (0 == selector_cnt) {
+                continue;
+              } else if (OB_FAIL(datum_stores_[i]->add_batch(exprs,
                                                  *(ir_rtdef_->get_inv_idx_scan_rtdef()->eval_ctx_),
-                                                 *skips[i],
+                                                 *fake_skip,
                                                  count,
-                                                 stored_rows_count))) {
+                                                 part_selectors + i * capacity,
+                                                 selector_cnt,
+                                                 nullptr))) {
                 LOG_WARN("failed to add datum", K(ret));
               } else {
-                check_count += stored_rows_count;
-                token_doc_cnt += stored_rows_count;
+                check_count += selector_cnt;
+                token_doc_cnt += selector_cnt;
               }
             }
             if (OB_SUCC(ret) && check_count != count) {

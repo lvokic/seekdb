@@ -885,7 +885,9 @@ ObTextRetrievalBlockMaxIter::ObTextRetrievalBlockMaxIter()
     dim_max_score_(0),
     block_max_inited_(false),
     in_shallow_status_(false),
-    is_inited_(false)
+    is_inited_(false),
+    hash_only_param_(),
+    hash_only_ranges_()
 {
 }
 
@@ -1087,29 +1089,31 @@ int ObTextRetrievalBlockMaxIter::calc_dim_max_score(
   // Maybe a specialized interface to calculate dimension max score based on statistics is more efficient
   if (OB_FAIL(block_max_iter_.init(ranking_param, block_max_iter_param, scan_param))) {
     LOG_WARN("failed to init block max iter", K(ret));
-  }
-
-  while (OB_SUCC(ret)) {
-    const ObMaxScoreTuple *max_score_tuple = nullptr;
-    if (OB_FAIL(block_max_iter_.get_next(max_score_tuple))) {
-      if (OB_UNLIKELY(OB_ITER_END != ret)) {
-        LOG_WARN("failed to get next max score tuple", K(ret));
-      }
-    } else if (OB_ISNULL(max_score_tuple)) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("unexpected nullptr to max score tuple", K(ret), KP_(max_score_tuple));
-    } else {
-      dim_max_score_ = std::max(dim_max_score_, max_score_tuple->max_score_);
-      LOG_DEBUG("[Text Retrieval] calc dim max score", K(ret), K(dim_max_score_), K(max_score_tuple->max_score_),
-        KPC(max_score_tuple->max_domain_id_), KPC(max_score_tuple->min_domain_id_));
-    }
-  }
-
-  if (OB_LIKELY(OB_ITER_END == ret)) {
-    ret = OB_SUCCESS;
-    block_max_iter_.reset(); // TODO: reuse or rewind iter
   } else {
-    LOG_WARN("failed to calc dim max score", K(ret));
+    while (OB_SUCC(ret)) {
+      const ObMaxScoreTuple *max_score_tuple = nullptr;
+      if (OB_FAIL(block_max_iter_.get_next(max_score_tuple))) {
+        if (OB_UNLIKELY(OB_ITER_END != ret)) {
+          LOG_WARN("failed to get next max score tuple", K(ret));
+        }
+      } else if (OB_ISNULL(max_score_tuple)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected nullptr to max score tuple", K(ret));
+      } else {
+        dim_max_score_ = std::max(dim_max_score_, max_score_tuple->max_score_);
+        LOG_DEBUG("[Text Retrieval] calc dim max score", K(ret), 
+            K(dim_max_score_), 
+            K(max_score_tuple->max_score_), 
+            KPC(max_score_tuple->min_domain_id_));
+      }
+    }
+
+    if (OB_LIKELY(OB_ITER_END == ret)) {
+      ret = OB_SUCCESS;
+    } else {
+      LOG_WARN("failed to calc dim max score", K(ret));
+    }
+    block_max_iter_.reset();
   }
   return ret;
 }
@@ -1127,12 +1131,70 @@ int ObTextRetrievalBlockMaxIter::init_block_max_iter(const int64_t total_doc_cnt
   } else if (FALSE_IT(ranking_param_.avg_doc_token_cnt_ = avg_doc_token_cnt)) {
   } else if (OB_FAIL(token_iter_.get_token_doc_cnt(ranking_param_.doc_freq_))) {
     LOG_WARN("failed to get token doc cnt", K(ret));
-  } else if (OB_FAIL(calc_dim_max_score(*block_max_iter_param_, ranking_param_, *block_max_scan_param_))) {
-    LOG_WARN("failed to calc dim max score", K(ret));
-  } else if (OB_FAIL(block_max_iter_.init(ranking_param_, *block_max_iter_param_, *block_max_scan_param_))) {
-    LOG_WARN("failed to init block max iter", K(ret));
   } else {
-    block_max_inited_ = true;
+    const ObTableScanParam *src_param = block_max_scan_param_;
+    common::ObIAllocator *allocator = src_param->allocator_; 
+    if (OB_ISNULL(allocator)) {
+      allocator = &CURRENT_CONTEXT->get_arena_allocator();
+    }
+
+    hash_only_ranges_.reset();
+    
+    int64_t range_cnt = src_param->key_ranges_.count();
+    void *obj_buf = allocator->alloc(sizeof(ObObj) * 2 * range_cnt);
+    
+    if (OB_ISNULL(obj_buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("failed to allocate memory for objs", K(ret));
+    } else {
+      ObObj *obj_ptr_base = static_cast<ObObj*>(obj_buf);
+      int64_t obj_ptr_offset = 0;
+
+      for (int64_t i = 0; OB_SUCC(ret) && i < range_cnt; ++i) {
+        const ObNewRange &src_range = src_param->key_ranges_.at(i);
+        if (src_range.start_key_.get_obj_cnt() < 1 || src_range.end_key_.get_obj_cnt() < 1) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("invalid range col count", K(ret), K(src_range));
+        } else {
+          ObObj *start_ptr = obj_ptr_base + obj_ptr_offset++;
+          ObObj *end_ptr   = obj_ptr_base + obj_ptr_offset++;
+
+          *start_ptr = src_range.start_key_.get_obj_ptr()[0];
+          *end_ptr   = src_range.end_key_.get_obj_ptr()[0];
+
+          ObNewRange dst = src_range; 
+          dst.start_key_.assign(start_ptr, 1);
+          dst.end_key_.assign(end_ptr, 1);
+          
+          if (OB_FAIL(hash_only_ranges_.push_back(dst))) {
+            LOG_WARN("failed to push hash range", K(ret));
+          }
+        }
+      }
+    }
+
+    if (OB_SUCC(ret)) {
+      MEMCPY((void*)&hash_only_param_, (const void*)src_param, sizeof(ObTableScanParam));
+
+      new (&hash_only_param_.key_ranges_) common::ObRangeArray();
+      new (&hash_only_param_.ss_key_ranges_) common::ObRangeArray(); 
+
+      if (OB_FAIL(hash_only_param_.key_ranges_.assign(hash_only_ranges_))) {
+        LOG_WARN("failed to assign ranges to member param", K(ret));
+      } else {
+        block_max_scan_param_ = &hash_only_param_;
+      }
+    }
+
+    if (OB_SUCC(ret)) {
+      if (OB_FAIL(calc_dim_max_score(*block_max_iter_param_, ranking_param_, *block_max_scan_param_))) {
+        LOG_WARN("failed to calc dim max score", K(ret));
+      } else if (OB_FAIL(block_max_iter_.init(ranking_param_, *block_max_iter_param_, *block_max_scan_param_))) {
+        LOG_WARN("failed to init block max iter", K(ret));
+      } else {
+        block_max_inited_ = true;
+      }
+    }
   }
   return ret;
 }
