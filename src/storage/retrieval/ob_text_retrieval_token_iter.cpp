@@ -1137,55 +1137,65 @@ int ObTextRetrievalBlockMaxIter::init_block_max_iter(const int64_t total_doc_cnt
     if (OB_ISNULL(allocator)) {
       allocator = &CURRENT_CONTEXT->get_arena_allocator();
     }
-
-    hash_only_ranges_.reset();
-    
-    int64_t range_cnt = src_param->key_ranges_.count();
-    void *obj_buf = allocator->alloc(sizeof(ObObj) * 2 * range_cnt);
-    
-    if (OB_ISNULL(obj_buf)) {
-      ret = OB_ALLOCATE_MEMORY_FAILED;
-      LOG_WARN("failed to allocate memory for objs", K(ret));
-    } else {
-      ObObj *obj_ptr_base = static_cast<ObObj*>(obj_buf);
-      int64_t obj_ptr_offset = 0;
-
-      for (int64_t i = 0; OB_SUCC(ret) && i < range_cnt; ++i) {
-        const ObNewRange &src_range = src_param->key_ranges_.at(i);
-        if (src_range.start_key_.get_obj_cnt() < 1 || src_range.end_key_.get_obj_cnt() < 1) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("invalid range col count", K(ret), K(src_range));
-        } else {
-          ObObj *start_ptr = obj_ptr_base + obj_ptr_offset++;
-          ObObj *end_ptr   = obj_ptr_base + obj_ptr_offset++;
-
-          *start_ptr = src_range.start_key_.get_obj_ptr()[0];
-          *end_ptr   = src_range.end_key_.get_obj_ptr()[0];
-
-          ObNewRange dst = src_range; 
-          dst.start_key_.assign(start_ptr, 1);
-          dst.end_key_.assign(end_ptr, 1);
-          
-          if (OB_FAIL(hash_only_ranges_.push_back(dst))) {
-            LOG_WARN("failed to push hash range", K(ret));
+    MEMCPY((void*)&hash_only_param_, (const void*)src_param, sizeof(ObTableScanParam));
+    new (&hash_only_param_.key_ranges_) common::ObRangeArray();
+    new (&hash_only_param_.ss_key_ranges_) common::ObRangeArray(); 
+    int64_t key_cnt = src_param->key_ranges_.count();
+    if (key_cnt > 0) {
+      void *buf = allocator->alloc(sizeof(ObObj) * 2 * key_cnt);
+      if (OB_ISNULL(buf)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_WARN("failed to allocate memory for objs", K(ret));
+      } else {
+        ObObj *ptr = static_cast<ObObj*>(buf);
+        for (int64_t i = 0; OB_SUCC(ret) && i < key_cnt; ++i) {
+          const ObNewRange &src = src_param->key_ranges_.at(i);
+          if (src.start_key_.get_obj_cnt() < 1 || src.end_key_.get_obj_cnt() < 1) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("invalid range col count", K(ret), K(src));
+          } else {
+            ObObj *s = ptr++; *s = src.start_key_.get_obj_ptr()[0];
+            ObObj *e = ptr++; *e = src.end_key_.get_obj_ptr()[0];
+            ObNewRange dst = src;
+            dst.start_key_.assign(s, 1);
+            dst.end_key_.assign(e, 1);
+            if (OB_FAIL(hash_only_param_.key_ranges_.push_back(dst))) {
+              LOG_WARN("failed to push key range", K(ret));
+            }
           }
         }
       }
     }
-
-    if (OB_SUCC(ret)) {
-      MEMCPY((void*)&hash_only_param_, (const void*)src_param, sizeof(ObTableScanParam));
-
-      new (&hash_only_param_.key_ranges_) common::ObRangeArray();
-      new (&hash_only_param_.ss_key_ranges_) common::ObRangeArray(); 
-
-      if (OB_FAIL(hash_only_param_.key_ranges_.assign(hash_only_ranges_))) {
-        LOG_WARN("failed to assign ranges to member param", K(ret));
+    int64_t ss_cnt = src_param->ss_key_ranges_.count();
+    if (OB_SUCC(ret) && ss_cnt > 0) {
+      void *buf = allocator->alloc(sizeof(ObObj) * 2 * ss_cnt);
+      if (OB_ISNULL(buf)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_WARN("failed to allocate memory for ss objs", K(ret));
       } else {
-        block_max_scan_param_ = &hash_only_param_;
+        ObObj *ptr = static_cast<ObObj*>(buf);
+        for (int64_t i = 0; OB_SUCC(ret) && i < ss_cnt; ++i) {
+          const ObNewRange &src = src_param->ss_key_ranges_.at(i);
+          if (src.start_key_.get_obj_cnt() < 1) { 
+            if (OB_FAIL(hash_only_param_.ss_key_ranges_.push_back(src))) {
+              LOG_WARN("push failed", K(ret));
+            }
+          } else {
+            ObObj *s = ptr++; *s = src.start_key_.get_obj_ptr()[0];
+            ObObj *e = ptr++; *e = src.end_key_.get_obj_ptr()[0];
+            ObNewRange dst = src; 
+            dst.start_key_.assign(s, 1);
+            dst.end_key_.assign(e, 1);
+            if (OB_FAIL(hash_only_param_.ss_key_ranges_.push_back(dst))) {
+              LOG_WARN("failed to push ss key range", K(ret));
+            }
+          }
+        }
       }
     }
-
+    if (OB_SUCC(ret)) {
+      block_max_scan_param_ = &hash_only_param_;
+    }
     if (OB_SUCC(ret)) {
       if (OB_FAIL(calc_dim_max_score(*block_max_iter_param_, ranking_param_, *block_max_scan_param_))) {
         LOG_WARN("failed to calc dim max score", K(ret));

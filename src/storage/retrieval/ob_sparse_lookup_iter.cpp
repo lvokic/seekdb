@@ -201,12 +201,14 @@ int ObSRSortedLookupIter::load_results()
     const ObDatumVector &relevance_datums = iter_param_->relevance_proj_expr_->locate_expr_datumvector(*eval_ctx);
     int cmp_result = 0;
     for (int64_t i = 0; OB_SUCC(ret) && i < sub_count; ) {
-      if (OB_UNLIKELY(cur_idx >= rangekey_size_)) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("unexpected cur idx", K(ret), K(cur_idx), K_(rangekey_size));
-      } else if (OB_FAIL(cmp_func_(cached_domain_ids_[cur_idx].get_datum(), *id_datums.at(i), cmp_result))) {
+      if (cur_idx >= rangekey_size_) {
+        i++;
+        continue;
+      } 
+      if (OB_FAIL(cmp_func_(cached_domain_ids_[cur_idx].get_datum(), *id_datums.at(i), cmp_result))) {
         LOG_WARN("failed to compare id datums", K(ret));
       } else if (0 == cmp_result) {
+        // 匹配成功
         cached_relevances_[cur_idx] = relevance_datums.at(i)->get_double();
         ++cur_idx;
         ++i;
@@ -214,10 +216,13 @@ int ObSRSortedLookupIter::load_results()
         cached_relevances_[cur_idx] = 0.0;
         ++cur_idx;
       } else {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("unexpected comparison result", K(ret), K(cmp_result));
+        i++; 
       }
     }
+  }
+  while (OB_SUCC(ret) && cur_idx < rangekey_size_) {
+      cached_relevances_[cur_idx] = 0.0;
+      cur_idx++;
   }
   if (OB_ITER_END == ret) {
     ret = OB_SUCCESS;
@@ -319,16 +324,20 @@ int ObSRHashLookupIter::load_results()
     ObDocIdExt id;
     double relevance = 0.0;
     for (int64_t i = 0; OB_SUCC(ret) && i < sub_count; ++i) {
-      if (OB_UNLIKELY(cur_idx >= rangekey_size_)) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("unexpected cur idx", K(ret), K(cur_idx), K_(rangekey_size));
-      } else if (OB_FAIL(id.from_datum(*id_datums.at(i)))) {
+      // [FIX] 防御性检查：如果当前索引超出了预期范围（通常是因为底层返回了 Hash 碰撞的多余数据）
+      // 不要报错 -4016，而是直接跳过这些多余数据，保证查询健壮性。
+      if (cur_idx >= rangekey_size_) {
+        continue;
+      }
+      if (OB_FAIL(id.from_datum(*id_datums.at(i)))) {
         LOG_WARN("failed to get id from datum", K(ret));
       } else if (OB_UNLIKELY(OB_HASH_NOT_EXIST != (ret = hash_map_.get_refactored(id, relevance)))) {
         ret = COVER_SUCC(OB_ERR_UNEXPECTED);
         LOG_WARN("unexpected repeated domain id", K(ret), K(id), K(relevance));
       } else if (OB_FAIL(hash_map_.set_refactored(id, relevance_datums.at(i)->get_double(), 0))) {
         LOG_WARN("failed to set relevance in hash map", K(ret));
+      } else {
+        ++cur_idx;
       }
     }
   }

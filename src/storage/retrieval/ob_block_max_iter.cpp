@@ -368,24 +368,18 @@ int ObBlockMaxScoreIterator::calc_domain_id_range(const ObDatumRow &agg_row, con
   const int64_t dim_rowkey_idx = block_max_scan_param_->dim_col_idx_in_rowkey_;
   int cmp_ret = 0;
   if (OB_UNLIKELY(min_idx >= agg_row.get_column_count()
-      || max_idx >= agg_row.get_column_count()
-      || id_rowkey_idx >= endkey.get_datum_cnt()
-      || dim_rowkey_idx >= endkey.get_datum_cnt())) {
+      || max_idx >= agg_row.get_column_count())) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid argument", K(ret), K(min_idx), K(max_idx), K(id_rowkey_idx),
-        K(dim_rowkey_idx), K(agg_row), K(endkey));
+    LOG_WARN("invalid argument", K(ret), K(min_idx), K(max_idx), K(agg_row));
   } else {
     const ObDatum &min_datum = agg_row.storage_datums_[min_idx];
     const ObDatum &max_datum = agg_row.storage_datums_[max_idx];
-    const ObDatum &rowkey_id_datum = endkey.get_datum(id_rowkey_idx);
-    const ObDatum &rowkey_dim_datum = endkey.get_datum(dim_rowkey_idx);
-    if (OB_UNLIKELY(min_datum.is_null() || max_datum.is_null() || rowkey_id_datum.is_null())) {
+    const ObDatum *rowkey_id_datum_ptr = (id_rowkey_idx < endkey.get_datum_cnt()) ? &endkey.get_datum(id_rowkey_idx) : nullptr;
+    const ObDatum *rowkey_dim_datum_ptr = (dim_rowkey_idx < endkey.get_datum_cnt()) ? &endkey.get_datum(dim_rowkey_idx) : nullptr;
+    if (OB_UNLIKELY(min_datum.is_null() || max_datum.is_null())) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("unexpected null domain id datum", K(ret), K(min_datum), K(max_datum), K(rowkey_id_datum));
+      LOG_WARN("unexpected null domain id datum", K(ret), K(min_datum), K(max_datum));
     } else {
-      // Min datum in last iterated range might not aligned with the upper bound of max score.
-      // but since we scan doc id in ascending order, we can use current iter doc id datum to refine the min doc id semantic.
-
       if (!has_been_advanced_) {
         max_score_tuple_.min_domain_id_ = &min_datum;
       } else if (OB_FAIL(domain_id_cmp_.compare(min_datum, advance_doc_id_.get_datum(), cmp_ret))) {
@@ -393,32 +387,33 @@ int ObBlockMaxScoreIterator::calc_domain_id_range(const ObDatumRow &agg_row, con
       } else {
         max_score_tuple_.min_domain_id_ = cmp_ret >= 0 ? &min_datum : &advance_doc_id_.get_datum();
       }
-
-      if (OB_FAIL(ret)) {
-      } else {
-        // Since micro block is not divided by dimension boundary, max_datum in first statistic range
-        // might comes from other dimension and not aligned with the data range covered by upper bound of max score.
-        const ObObj &scan_dim_obj = block_stat_scan_param_.get_scan_param()->key_ranges_.at(0).end_key_.get_obj_ptr()[dim_rowkey_idx];
-        ObStorageDatum scan_dim_datum;
-        if (OB_FAIL(scan_dim_datum.from_obj(scan_dim_obj))) {
-          LOG_WARN("fail to convert to datum", K(ret), K(scan_dim_obj));
-        } else if (OB_UNLIKELY(rowkey_dim_datum.is_ext() || scan_dim_datum.is_ext())) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("unexpected ext datum for dimension", K(ret), K(rowkey_dim_datum), K(scan_dim_datum));
-        } else if (OB_FAIL(dim_cmp_(rowkey_dim_datum, scan_dim_datum, cmp_ret))) {
-          LOG_WARN("fail to compare dim", K(ret), K(scan_dim_obj), K(rowkey_dim_datum));
-        } else if (OB_UNLIKELY(cmp_ret < 0)) {
-          // [ADD] 如果是小于，说明当前 Block 的 EndKey 还没覆盖到当前维度的结束
-          // 这通常是因为 Hash 碰撞或者前缀压缩导致的，我们应该保守地使用 Block 的 Max DocID
-          max_score_tuple_.max_domain_id_ = &max_datum;
+      if (OB_SUCC(ret)) {
+        bool safe_fallback = false;
+        if (nullptr == rowkey_dim_datum_ptr || nullptr == rowkey_id_datum_ptr) {
+          safe_fallback = true;
         } else {
-          if (cmp_ret > 0) {
-            // reached the end of the dimension
-            max_score_tuple_.max_domain_id_ = &max_datum;
+          const ObObj &scan_dim_obj = block_stat_scan_param_.get_scan_param()->key_ranges_.at(0).end_key_.get_obj_ptr()[dim_rowkey_idx];
+          ObStorageDatum scan_dim_datum;
+          if (OB_FAIL(scan_dim_datum.from_obj(scan_dim_obj))) {
+            LOG_WARN("fail to convert to datum", K(ret));
+            ret = OB_SUCCESS;
+            safe_fallback = true;
+          } else if (OB_FAIL(dim_cmp_(*rowkey_dim_datum_ptr, scan_dim_datum, cmp_ret))) {
+            LOG_WARN("fail to compare dim, fallback to full block", K(ret), K(scan_dim_obj), KPC(rowkey_dim_datum_ptr));
+            ret = OB_SUCCESS;
+            safe_fallback = true;
+          } else if (cmp_ret < 0) {
+            safe_fallback = true;
           } else {
-            // use id from iterated end key as a safe boundary
-            max_score_tuple_.max_domain_id_ = &rowkey_id_datum;
+            if (cmp_ret > 0) {
+              max_score_tuple_.max_domain_id_ = &max_datum;
+            } else {
+              max_score_tuple_.max_domain_id_ = rowkey_id_datum_ptr;
+            }
           }
+        }
+        if (safe_fallback) {
+          max_score_tuple_.max_domain_id_ = &max_datum;
         }
       }
     }

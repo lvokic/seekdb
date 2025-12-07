@@ -113,11 +113,21 @@ SELECT
 FROM oceanbase.__all_tablet_to_ls 
 WHERE table_id IN (500010, 500011);
 
+SELECT 
+    docid_col, 
+    MATCH(fulltext_col) AGAINST('What organization proposed listing PFOA under the Stockholm Convention' IN NATURAL LANGUAGE MODE) as _score
+FROM test_insert_en
+WHERE MATCH(fulltext_col) AGAINST('What organization proposed listing PFOA under the Stockholm Convention' IN NATURAL LANGUAGE MODE) 
+  AND base_id IN ('base_id_1', 'base_id_2', 'base_id_3') 
+  AND id < 1000 
+ORDER BY _score DESC
+LIMIT 5;
+
 
 # insert_ctdef_ 里面包含了 table_id 信息
 # 注意：具体成员变量路径可能因版本略有不同，常用的是下面这个
 b oceanbase::sql::ObDASInsertOp::insert_rows
 cond 1 this->insert_ctdef_->table_param_.data_table_.table_id_ == 500007
 
-grep -a -C 5 "YB427F000001-00064530637D82FD-0-0" observer.log.wf
+grep -a -C 5 "YB427F000001-0006455A08D56A0C-0-0" observer.log
 grep -a "ob_table_scan_op.cpp" observer.log | grep "init_ddl_column_checksum" | grep "ret=-4002" | tail -n 5
