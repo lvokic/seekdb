@@ -105,6 +105,15 @@ int ObDASTRMergeIter::inner_init(ObDASIterParam &param)
       }
     }
     sr_iter_param_.max_batch_size_ = merge_param.max_batch_size_; // may be greater than ir_rtdef_->eval_ctx_->max_batch_size_
+    
+    sr_iter_param_.id_lower_bound_ = merge_param.id_lower_bound_;
+    sr_iter_param_.id_upper_bound_ = merge_param.id_upper_bound_;
+    
+    if (topk_mode_ && (sr_iter_param_.id_lower_bound_ > 0 || sr_iter_param_.id_upper_bound_ >= 0)) {
+      LOG_INFO("[Scalar Filter] ID range filter configured for text retrieval (primary key)",
+               K_(sr_iter_param_.id_lower_bound), K_(sr_iter_param_.id_upper_bound));
+    }
+    
     inv_idx_tablet_switched_ = false;
     is_inited_ = true;
     LOG_DEBUG("tr merge iter", K_(function_lookup_mode), K_(topk_mode), K_(daat_mode), K_(taat_mode));
@@ -481,6 +490,7 @@ int ObDASTRMergeIter::create_sparse_retrieval_iter()
   sr_iter_param_.relevance_proj_expr_ = ir_ctdef_->relevance_proj_col_;
   sr_iter_param_.filter_expr_ = ir_ctdef_->match_filter_;
   sr_iter_param_.topk_limit_ = topk_limit_;
+  sr_iter_param_.topk_reserve_count_ = 0;
   if (OB_NOT_NULL(ir_ctdef_->field_boost_expr_)) {
     ObDatum *boost_datum = nullptr;
     if (OB_FAIL(ir_ctdef_->field_boost_expr_->eval(*ir_rtdef_->eval_ctx_, boost_datum))) {
@@ -510,6 +520,28 @@ int ObDASTRMergeIter::create_sparse_retrieval_iter()
         }
       }
     }
+  }
+  // Two-phase optimization: configure reserve count for BMW iterator
+  if (OB_SUCC(ret) && topk_mode_ && function_lookup_mode_ && sr_iter_param_.topk_limit_ > 0) {
+    // Read reserve ratio from system variable (default 130 = 30% reserve)
+    uint64_t reserve_ratio_percent = 130;  // Default 30% reserve
+    const ObBasicSessionInfo *session = ir_rtdef_->eval_ctx_->exec_ctx_.get_my_session();
+    
+    if (OB_NOT_NULL(session)) {
+      int tmp_ret = session->get_bmw_topk_reserve_ratio(reserve_ratio_percent);
+      if (OB_SUCCESS != tmp_ret) {
+        LOG_WARN("failed to get bmw topk reserve ratio, use default", K(tmp_ret));
+        reserve_ratio_percent = 130;  // Fallback to default
+      }
+    }
+    // Convert percentage to ratio (130 -> 1.3)
+    const double reserve_ratio = static_cast<double>(reserve_ratio_percent) / 100.0;
+    const int64_t reserve_cnt = static_cast<int64_t>(sr_iter_param_.topk_limit_ * reserve_ratio);
+    sr_iter_param_.topk_reserve_count_ = MIN(reserve_cnt, INT64_MAX);
+    
+    LOG_DEBUG("[Two-Phase Config] Setting topk reserve count for BMW optimization",
+        K_(sr_iter_param_.topk_limit), K_(sr_iter_param_.topk_reserve_count), 
+        K(reserve_ratio_percent), K(reserve_ratio));
   }
   if (OB_FAIL(ret)) {
   } else if (topk_mode_) {
@@ -557,9 +589,11 @@ int ObDASTRMergeIter::create_sparse_retrieval_iter()
   }
   if (OB_SUCC(ret) && function_lookup_mode_) {
     ObSRLookupIter *lookup_iter = nullptr;
-    if (OB_UNLIKELY(topk_mode_)) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("unexpected both topk mode and function lookup mode", K(ret));
+    if (topk_mode_) {
+      if (OB_ISNULL(lookup_iter = OB_NEWx(ObSRHashLookupIter, &myself_allocator_))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_WARN("failed to allocate memory for hash lookup iter under topk mode", K(ret));
+      }
     } else if (daat_mode_) {
       if (OB_ISNULL(lookup_iter = OB_NEWx(ObSRSortedLookupIter, &myself_allocator_))) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
@@ -769,6 +803,10 @@ int ObDASTRMergeIter::set_children_iter_rangekey(const common::ObIArray<std::pai
           if (OB_FAIL(inv_agg_params_[i]->key_ranges_.push_back(inv_idx_scan_range))) {
             LOG_WARN("failed to push back lookup range", K(ret));
           }
+      }
+      if (OB_SUCC(ret) && topk_mode_ && ir_ctdef_->need_block_max_scan()
+          && OB_FAIL(block_max_scan_params_[i]->key_ranges_.push_back(inv_idx_scan_range))) {
+        LOG_WARN("failed to push back block max scan range", K(ret));
       }
     }
   }

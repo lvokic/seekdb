@@ -20,6 +20,7 @@
 #include "lib/container/ob_heap.h"
 #include "ob_sparse_daat_iter.h"
 #include "ob_sparse_retrieval_util.h"
+#include "ob_scalar_filter_candidate_set.h"
 
 namespace oceanbase
 {
@@ -49,7 +50,7 @@ protected:
   int next_pivot_range(int64_t &skip_range_cnt);
   int evaluate_pivot(const int64_t pivot_iter_idx);
   int evaluate_pivot_range(const int64_t pivot_iter_idx, bool &is_candidate);
-  double get_top_k_threshold()
+  double get_top_k_threshold() const
   {
     return top_k_heap_.empty() ? 0.0 : top_k_heap_.top().relevance_;
   }
@@ -79,6 +80,68 @@ protected:
     FINISHED,
     MAX_STATUS,
   };
+
+  // Two-phase optimization configuration
+  struct TwoPhaseConfig {
+    TwoPhaseConfig() : enabled_(false), baseline_ratio_(1.0), reserve_ratio_(1.2),
+                       use_adaptive_threshold_(true), min_baseline_count_(10) {}
+    bool enabled_;                    // Enable two-phase optimization
+    double baseline_ratio_;           // Ratio of baseline to target topk (default 1.0)
+    double reserve_ratio_;            // Reserve count ratio for phase 2 (default 1.2)
+    bool use_adaptive_threshold_;     // Dynamically adjust threshold based on selectivity
+    int64_t min_baseline_count_;      // Minimum baseline count to enable optimization
+    TO_STRING_KV(K_(enabled), K_(baseline_ratio), K_(reserve_ratio), 
+                 K_(use_adaptive_threshold), K_(min_baseline_count));
+  };
+
+  // Statistics for two-phase optimization
+  struct TwoPhaseStats {
+    TwoPhaseStats() { reset(); }
+    void reset() {
+      phase1_row_count_ = 0;
+      phase1_min_score_ = 0.0;
+      phase1_max_score_ = 0.0;
+      phase1_avg_score_ = 0.0;
+      phase2_row_count_ = 0;
+      phase2_pruned_count_ = 0;
+      phase2_pivot_pruned_count_ = 0;
+      phase2_total_pivots_ = 0;
+      phase2_evaluated_pivots_ = 0;
+      fallback_count_ = 0;
+      final_threshold_ = 0.0;
+      early_termination_ = false;
+      selectivity_ratio_ = 0.0;
+      scalar_filtered_count_ = 0;  // 新增: 被标量过滤掉的文档数
+    }
+    int64_t phase1_row_count_;          // Rows collected in phase 1
+    double phase1_min_score_;           // Minimum score from phase 1
+    double phase1_max_score_;           // Maximum score from phase 1
+    double phase1_avg_score_;           // Average score from phase 1
+    int64_t phase2_row_count_;          // Rows collected in phase 2
+    int64_t phase2_pruned_count_;       // Rows pruned by baseline threshold
+    int64_t phase2_pivot_pruned_count_; // Pivots pruned by baseline threshold
+    int64_t phase2_total_pivots_;       // Total pivots examined in phase 2
+    int64_t phase2_evaluated_pivots_;   // Pivots fully evaluated in phase 2
+    int64_t fallback_count_;            // Times fallback to baseline results
+    double final_threshold_;            // Final threshold used
+    bool early_termination_;            // Whether phase 2 terminated early
+    double selectivity_ratio_;          // Selectivity = pruned / total
+    int64_t scalar_filtered_count_;     // Rows filtered by scalar conditions
+    
+    double get_pruning_ratio() const {
+      return phase2_total_pivots_ > 0 
+          ? static_cast<double>(phase2_pivot_pruned_count_) / phase2_total_pivots_ 
+          : 0.0;
+    }
+    
+    TO_STRING_KV(K_(phase1_row_count), K_(phase1_min_score), K_(phase1_max_score),
+                 K_(phase1_avg_score), K_(phase2_row_count), K_(phase2_pruned_count), 
+                 K_(phase2_pivot_pruned_count), K_(phase2_total_pivots), 
+                 K_(phase2_evaluated_pivots), K_(fallback_count), K_(final_threshold),
+                 K_(early_termination), K_(selectivity_ratio), K_(scalar_filtered_count),
+                 "pruning_ratio", get_pruning_ratio());
+  };
+
   struct TopKItem {
     TopKItem() : relevance_(0.0), cache_idx_(-1) {}
     TopKItem(const double &relevance, const int64_t &cache_idx) : relevance_(relevance), cache_idx_(cache_idx) {}
@@ -96,15 +159,49 @@ protected:
   };
   typedef common::ObBinaryHeap<TopKItem, TopKItemCmp> TopKHeap;
 
+  // Two-phase optimization methods
+  int init_two_phase_config();
+  int execute_phase1_baseline();
+  int execute_phase2_bmw();
+  bool should_use_two_phase() const { return two_phase_config_.enabled_ && baseline_top_k_count_ > 0; }
+  double get_adaptive_threshold() const;
+  int merge_baseline_and_phase2_results();
+  void update_two_phase_stats();
+  
+  // Advanced optimization methods
+  bool should_terminate_phase2_early() const;
+  double predict_optimal_threshold() const;
+  void adjust_threshold_dynamically();
+  double calculate_selectivity_ratio() const;
+
   DISALLOW_COPY_AND_ASSIGN(ObSRBMWIterImpl);
   ObArenaAllocator allocator_;
   TopKItemCmp less_score_cmp_;
+  // search_count may be greater than baseline_count_ to reserve rows for post-filtering
   // Maybe domain id not need to be cached within the topk heap since there would be top-n sort with datum store above
   TopKHeap top_k_heap_;
   int64_t top_k_count_;
+  int64_t baseline_top_k_count_;
+  double baseline_min_score_;
   ObDomainIdCmp domain_id_cmp_;
   ObFixedArray<ObDocIdExt, ObIAllocator> id_cache_;
+  ObFixedArray<ObDocIdExt, ObIAllocator> baseline_id_cache_;
+  ObFixedArray<double, ObIAllocator> baseline_relevances_;
   BMWStatus status_;
+  // Two-phase optimization members
+  TwoPhaseConfig two_phase_config_;
+  TwoPhaseStats two_phase_stats_;
+  bool is_phase1_completed_;
+  bool is_phase2_completed_;
+  
+  // Scalar filter prefetch optimization
+  const ObScalarFilterCandidateSet *scalar_candidates_;
+  bool enable_scalar_filter_;
+  
+  // Simple ID range filter (for primary key id)
+  int64_t id_lower_bound_;
+  int64_t id_upper_bound_;
+  bool enable_id_range_filter_;
 };
 
 

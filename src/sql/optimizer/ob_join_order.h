@@ -307,6 +307,7 @@ struct DomainIndexAccessInfo
       func_lookup_index_ids_(),
       match_exprs_(),
       match_index_ids_(),
+      doc_id_filters_(),
       domain_idx_type_(DomainIndexType::NON_DOMAIN_INDEX) {}
 
   void reset()
@@ -317,12 +318,14 @@ struct DomainIndexAccessInfo
     func_lookup_exprs_.reset();
     func_lookup_index_ids_.reset();
     match_exprs_.reset();
+    doc_id_filters_.reset(),
     match_index_ids_.reset();
   }
 
   bool has_ir_scan() const { return index_scan_exprs_.count() != 0 && domain_idx_type_ == DomainIndexType::FTS_INDEX; }
   bool has_func_lookup() const { return func_lookup_exprs_.count() != 0 && domain_idx_type_ == DomainIndexType::FTS_INDEX; }
   bool has_es_match() const { return match_exprs_.count() != 0 && domain_idx_type_ == DomainIndexType::FTS_INDEX; }
+  bool has_doc_id_range() const { return doc_id_filters_.count() != 0; }
   void set_domain_idx_type(DomainIndexType domain_idx_type) { domain_idx_type_ = domain_idx_type;}
   TO_STRING_KV(K_(index_scan_exprs), K_(index_scan_filters), K_(index_scan_index_ids),
       K_(func_lookup_exprs), K_(func_lookup_index_ids), K_(match_exprs), K_(match_index_ids), K_(domain_idx_type));
@@ -334,6 +337,7 @@ struct DomainIndexAccessInfo
   common::ObSEArray<uint64_t, 4, common::ModulePageAllocator, true> func_lookup_index_ids_;
   common::ObSEArray<ObRawExpr *, 4, common::ModulePageAllocator, true> match_exprs_;
   common::ObSEArray<uint64_t, 4, common::ModulePageAllocator, true> match_index_ids_;
+  common::ObSEArray<ObRawExpr *, 2, common::ModulePageAllocator, true> doc_id_filters_;
   // Add member
   DomainIndexType domain_idx_type_;
 };
@@ -2811,7 +2815,8 @@ struct NullAwareAntiJoinInfo {
                                 const ObTableSchema *index_schema, 
                                 ObQueryRangeProvider *query_range,
                                 int64_t &query_range_row_count,
-                                double &selectivity);
+                                double &selectivity,
+                                const ObIArray<ObRawExpr*> &doc_id_filters);
     int add_valid_fts_index_ids(PathHelper &helper, uint64_t *index_tid_array, int64_t &size);
     int add_valid_fts_index_ids_for_dml(const PathHelper &helper, 
                                         const uint64_t table_id,
@@ -3046,6 +3051,9 @@ struct NullAwareAntiJoinInfo {
                                   PathHelper &helper,
                                   ObIArray<uint64_t> &valid_hint_index_ids);
     int has_valid_match_filter_on_index(PathHelper &helper, uint64_t tid, bool &is_valid);
+    int check_is_doc_id_filter(const ObRawExpr *filter,
+                              const share::schema::ObTableSchema *index_schema,
+                              bool &is_doc_id_filter);
     friend class ::test::TestJoinOrder_ob_join_order_param_check_Test;
     friend class ::test::TestJoinOrder_ob_join_order_src_Test;
   private:

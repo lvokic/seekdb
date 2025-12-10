@@ -3192,6 +3192,8 @@ int ObLogPlan::allocate_access_path(AccessPath *ap,
             table_scan_filters,
             scan))) {
           LOG_WARN("failed to allocate text ir scan", K(ret));
+        } else if (OB_FAIL(append(scan->get_pushdown_filter_exprs(), scan->get_text_retrieval_info().scalar_filters_))) {
+          LOG_WARN("failed to append scalar filters", K(ret));
         } else if (ap->vec_idx_info_.has_vec_index() && ap->vec_idx_info_.vec_extra_info_.use_iter_filter()
                   && OB_FAIL(table_scan_filters.push_back(scan->get_text_retrieval_info().pushdown_match_filter_))) {
           LOG_WARN("fail to push match filter in vec iter scan", K(ret));
@@ -15694,8 +15696,8 @@ int ObLogPlan::try_push_topn_into_text_retrieval_scan(ObLogicalOperator *&top,
   } else if (OB_FALSE_IT(table_scan = static_cast<ObLogTableScan*>(top))) {
   } else if (!table_scan->is_text_retrieval_scan() || table_scan->use_index_merge()) {
     // do nothing
-  } else if (table_scan->get_filter_exprs().count() != 0 ||
-             table_scan->get_pushdown_filter_exprs().count() != 0) {
+  } else if ((table_scan->get_filter_exprs().count() != 0 && table_scan->get_doc_id_filters().count() == 0) ||
+              table_scan->get_pushdown_filter_exprs().count() != 0) {
     // do nothing, topn pushdown requires that only match filter exists on the base table.
   } else if (sort_keys.count() >= 1 && OB_NOT_NULL(sort_keys.at(0).expr_) &&
              sort_keys.at(0).expr_ == table_scan->get_text_retrieval_info().match_expr_) {

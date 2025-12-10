@@ -11811,5 +11811,20 @@
     "info_cn": "",
     "background_cn": "",
     "ref_url": ""
+  },
+  "ob_bmw_topk_reserve_ratio": {
+    "id": 10754,
+    "name": "ob_bmw_topk_reserve_ratio",
+    "default_value": "130",
+    "base_value": "130",
+    "data_type": "uint",
+    "info": "Reserve ratio for BMW two-phase optimization (100-200, default 130 means 30% reserve). Higher values improve recall at the cost of performance.",
+    "flags": "SESSION | GLOBAL",
+    "min_val": "100",
+    "max_val": "200",
+    "publish_version": "1.0.0.0",
+    "info_cn": "BMW两阶段优化的预留比例(100-200，默认130表示30%预留)。更高的值提升召回率但降低性能。",
+    "background_cn": "",
+    "ref_url": ""
   }
 }

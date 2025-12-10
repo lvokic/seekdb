@@ -37,6 +37,7 @@ namespace sql
 namespace storage
 {
 class ObMaxScoreTuple;
+class ObScalarFilterCandidateSet;
 
 class ObISparseRetrievalDimIter
 {
@@ -107,8 +108,13 @@ struct ObSparseRetrievalMergeParam
       relevance_proj_expr_(nullptr),
       filter_expr_(nullptr),
       topk_limit_(0),
+      topk_reserve_count_(0),
       field_boost_(1.0),
-      max_batch_size_(1)
+      max_batch_size_(1),
+      scalar_candidates_(nullptr),
+      enable_scalar_filter_(false),
+      id_lower_bound_(0),
+      id_upper_bound_(-1)
   {}
   ~ObSparseRetrievalMergeParam() {}
   bool need_project_relevance() const { return relevance_proj_expr_ != nullptr; }
@@ -116,7 +122,8 @@ struct ObSparseRetrievalMergeParam
   bool need_pushdown_topk() const { return topk_limit_ > 0; }
   TO_STRING_KV(KPC_(dim_weights), KPC(limit_param_), KP_(eval_ctx),
       KP_(id_proj_expr), KP_(relevance_expr), KP_(relevance_proj_expr), KP_(filter_expr),
-      K_(topk_limit), K_(max_batch_size));
+      K_(topk_limit), K_(max_batch_size), K_(enable_scalar_filter), 
+      K_(id_lower_bound), K_(id_upper_bound));
   const ObIArray<double> *dim_weights_; // score weight for each dimension
   const common::ObLimitParam *limit_param_;
   sql::ObEvalCtx *eval_ctx_;
@@ -125,8 +132,16 @@ struct ObSparseRetrievalMergeParam
   sql::ObExpr *relevance_proj_expr_;
   sql::ObExpr *filter_expr_; // filter expr on score
   int64_t topk_limit_;
+  // reserved extra topk rows for two-phase BMW pruning; should be >= topk_limit_ when enabled
+  int64_t topk_reserve_count_;
   double field_boost_;
   int64_t max_batch_size_;
+  // Scalar filter prefetch optimization
+  const ObScalarFilterCandidateSet *scalar_candidates_;
+  bool enable_scalar_filter_;
+  // Simple ID range filter (for primary key id filtering)
+  int64_t id_lower_bound_;  // 0 means no lower bound
+  int64_t id_upper_bound_;  // -1 means no upper bound
 };
 
 class ObISparseRetrievalMergeIter

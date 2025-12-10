@@ -346,7 +346,8 @@ private:
                                             const bool is_func_lookup,
                                             transaction::ObTxDesc *trans_desc,
                                             transaction::ObTxReadSnapshot *snapshot,
-                                            ObDASIter *&retrieval_result);
+                                            ObDASIter *&retrieval_result,
+                                            const ObDASScanCtDef *lookup_scan_ctdef = nullptr);
 
   static int create_match_sub_tree(ObTableScanParam &scan_param,
                                    common::ObIAllocator &alloc,

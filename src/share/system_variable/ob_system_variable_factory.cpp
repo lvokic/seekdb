@@ -1088,6 +1088,7 @@ const char *ObSysVarFactory::SYS_VAR_NAMES_SORTED_BY_NAME[] = {
   "nls_territory",
   "nls_timestamp_format",
   "nls_timestamp_tz_format",
+  "ob_bmw_topk_reserve_ratio",
   "ob_bnl_join_cache_size",
   "ob_capability_flag",
   "ob_check_sys_variable",
@@ -1929,6 +1930,7 @@ const ObSysVarClassType ObSysVarFactory::SYS_VAR_IDS_SORTED_BY_NAME[] = {
   SYS_VAR_NLS_TERRITORY,
   SYS_VAR_NLS_TIMESTAMP_FORMAT,
   SYS_VAR_NLS_TIMESTAMP_TZ_FORMAT,
+  SYS_VAR_OB_BMW_TOPK_RESERVE_RATIO,
   SYS_VAR_OB_BNL_JOIN_CACHE_SIZE,
   SYS_VAR_OB_CAPABILITY_FLAG,
   SYS_VAR_OB_CHECK_SYS_VARIABLE,
@@ -2359,6 +2361,7 @@ const char *ObSysVarFactory::SYS_VAR_NAMES_SORTED_BY_ID[] = {
   "ob_global_debug_sync",
   "ob_proxy_global_variables_version",
   "ob_enable_show_trace",
+  "ob_bmw_topk_reserve_ratio"
   "ob_bnl_join_cache_size",
   "ob_proxy_user_privilege",
   "ob_org_cluster_id",
@@ -11647,6 +11650,15 @@ int ObSysVarFactory::create_all_sys_vars()
         ptr = (void *)((char *)ptr + sizeof(ObSysVarObSparseDropRatioSearch));
       }
     }
+    if (OB_SUCC(ret)) {
+      if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarObBmwTopkReserveRatio())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to new ObSysVarObBmwTopkReserveRatio", K(ret));
+      } else {
+        store_buf_[ObSysVarsToIdxMap::get_store_idx(static_cast<int64_t>(SYS_VAR_OB_BMW_TOPK_RESERVE_RATIO))] = sys_var_ptr;
+        ptr = (void *)((char *)ptr + sizeof(ObSysVarObBmwTopkReserveRatio));
+      }
+    }
 
   }
   return ret;
@@ -20872,6 +20884,17 @@ int ObSysVarFactory::create_sys_var(ObIAllocator &allocator_, ObSysVarClassType 
       } else if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarObSparseDropRatioSearch())) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
         LOG_ERROR("fail to new ObSysVarObSparseDropRatioSearch", K(ret));
+      }
+      break;
+    }
+    case SYS_VAR_OB_BMW_TOPK_RESERVE_RATIO: {
+      void *ptr = NULL;
+      if (OB_ISNULL(ptr = allocator_.alloc(sizeof(ObSysVarObBmwTopkReserveRatio)))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to alloc memory", K(ret), K(sizeof(ObSysVarObBmwTopkReserveRatio)));
+      } else if (OB_ISNULL(sys_var_ptr = new (ptr)ObSysVarObBmwTopkReserveRatio())) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_ERROR("fail to new ObSysVarObBmwTopkReserveRatio", K(ret));
       }
       break;
     }

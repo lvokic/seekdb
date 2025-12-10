@@ -3881,6 +3881,11 @@ int ObBasicSessionInfo::get_ob_sparse_drop_ratio_search(uint64_t &ob_sparse_drop
 {
   return get_uint64_sys_var(SYS_VAR_OB_SPARSE_DROP_RATIO_SEARCH, ob_sparse_drop_ratio_search);
 }
+
+int ObBasicSessionInfo::get_bmw_topk_reserve_ratio(uint64_t &reserve_ratio) const
+{
+  return get_uint64_sys_var(SYS_VAR_OB_BMW_TOPK_RESERVE_RATIO, reserve_ratio);
+}
 ////////////////////////////////////////////////////////////////
 int ObBasicSessionInfo::replace_user_variables(const ObSessionValMap &user_var_map)
 {

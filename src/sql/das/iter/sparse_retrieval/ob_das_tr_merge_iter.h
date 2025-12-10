@@ -23,6 +23,7 @@
 #include "storage/retrieval/ob_text_daat_iter.h"
 #include "storage/retrieval/ob_text_taat_iter.h"
 #include "storage/retrieval/ob_sparse_lookup_iter.h"
+#include "storage/retrieval/ob_scalar_filter_candidate_set.h"
 
 namespace oceanbase
 {
@@ -47,7 +48,10 @@ struct ObDASTRMergeIterParam : public ObDASIterParam
       dim_weights_(),
       max_batch_size_(0),
       boolean_compute_node_(nullptr),
-      flags_(0)
+      flags_(0),
+      id_lower_bound_(0),
+      id_upper_bound_(-1),
+      scalar_candidates_(nullptr)
   {}
 
   virtual bool is_valid() const override
@@ -73,6 +77,10 @@ struct ObDASTRMergeIterParam : public ObDASIterParam
     };
     uint32_t flags_;
   };
+  // Scalar filter: ID range for primary key filtering
+  int64_t id_lower_bound_;  // 0 means no lower bound
+  int64_t id_upper_bound_;  // -1 means no upper bound
+  storage::ObScalarFilterCandidateSet *scalar_candidates_;
 };
 
 class ObDASTRMergeIter : public ObDASIter

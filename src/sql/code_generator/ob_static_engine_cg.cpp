@@ -5171,7 +5171,54 @@ int ObStaticEngineCG::generate_normal_tsc(ObLogTableScan &op, ObTableScanSpec &s
   if (OB_SUCC(ret)) {
     if (OB_FAIL(tsc_cg_service_.generate_tsc_ctdef(op, spec.tsc_ctdef_))) {
       LOG_WARN("generate tsc ctdef failed", K(ret));
-    } else if (FALSE_IT(spec.tsc_ctdef_.scan_flags_.enable_rich_format_
+    } else {
+      if (op.is_text_retrieval_scan()) {
+        ObDASBaseCtDef *attach_ctdef = spec.tsc_ctdef_.attach_spec_.attach_ctdef_;
+        ObDASBaseCtDef *curr_node = attach_ctdef;
+        ObDASIRScanCtDef *ir_ctdef = nullptr;
+        if (OB_NOT_NULL(attach_ctdef)) {
+          if (ObDASOpType::DAS_OP_INDEX_PROJ_LOOKUP == curr_node->op_type_) {
+            ObDASAttachCtDef *lookup_def = static_cast<ObDASAttachCtDef*>(curr_node);
+            if (lookup_def->children_cnt_ > 0) {
+              curr_node = lookup_def->children_[0];
+            }
+          }
+          if (OB_NOT_NULL(curr_node) && ObDASOpType::DAS_OP_SORT == curr_node->op_type_) {
+            ObDASAttachCtDef *sort_def = static_cast<ObDASAttachCtDef*>(curr_node);
+            if (sort_def->children_cnt_ > 0) {
+              curr_node = sort_def->children_[0];
+            }
+          }
+          if (OB_NOT_NULL(curr_node) && ObDASOpType::DAS_OP_IR_SCAN == curr_node->op_type_) {
+            ir_ctdef = static_cast<ObDASIRScanCtDef*>(curr_node);
+          }
+          if (OB_NOT_NULL(ir_ctdef)) {
+            const ObIArray<ObRawExpr *> &doc_id_filters = op.get_doc_id_filters();
+            if (doc_id_filters.count() > 0) {
+              ir_ctdef->scalar_filters_.set_allocator(&phy_plan_->get_allocator());
+              int64_t new_count = ir_ctdef->scalar_filters_.count() + doc_id_filters.count();
+              if (OB_FAIL(ir_ctdef->scalar_filters_.reserve(new_count))) {
+                LOG_WARN("failed to reserve scalar filters capacity", K(ret), K(new_count));
+              }
+              ObExpr *rt_expr = nullptr;
+              for (int64_t i = 0; OB_SUCC(ret) && i < doc_id_filters.count(); ++i) {
+                if (OB_FAIL(generate_rt_expr(*doc_id_filters.at(i), rt_expr))) {
+                  LOG_WARN("failed to generate rt expr for doc_id_filter", K(ret));
+                } 
+                else if (OB_FAIL(mark_expr_self_produced(doc_id_filters.at(i)))) {
+                  LOG_WARN("failed to mark expr self produced", K(ret));
+                }
+                else if (OB_FAIL(ir_ctdef->scalar_filters_.push_back(rt_expr))) {
+                  LOG_WARN("failed to push back rt expr to scalar_filters", K(ret));
+                }
+              }
+            }
+          }
+          const ObIArray<ObRawExpr *> &doc_id_filters = op.get_doc_id_filters();
+        }
+      }
+    }
+    if (FALSE_IT(spec.tsc_ctdef_.scan_flags_.enable_rich_format_
                         = spec.use_rich_format_)) {
       // do nothing
     }

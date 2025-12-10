@@ -3,12 +3,7 @@ set -e
 
 echo "=== 1. 杀掉 observer 进程 ==="
 OB_PID=$(pidof observer)
-if [ -n "$OB_PID" ]; then
-  echo "Killing observer: $OB_PID"
-  kill -9 $OB_PID
-else
-  echo "No observer process running."
-fi
+kill -9 $OB_PID
 
 echo ""
 echo "=== 2. 开始 debug 构建 ==="

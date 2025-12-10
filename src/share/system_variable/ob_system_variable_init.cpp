@@ -11483,13 +11483,28 @@ static struct VarsInit{
     ObSysVars[837].alias_ = "OB_SV_SPARSE_DROP_RATIO_SEARCH" ;
     }();
 
+    [&] (){
+      ObSysVars[838].default_value_ = "150" ;
+      ObSysVars[838].info_ = "reserve ratio for BMW two-phase topk optimization (percentage, 100-500)" ;
+      ObSysVars[838].name_ = "ob_bmw_topk_reserve_ratio" ;
+      ObSysVars[838].data_type_ = ObUInt64Type ;
+      ObSysVars[838].min_val_ = "100" ;
+      ObSysVars[838].max_val_ = "500" ;
+      ObSysVars[838].flags_ = ObSysVarFlag::SESSION_SCOPE ;
+      ObSysVars[838].id_ = SYS_VAR_OB_BMW_TOPK_RESERVE_RATIO ;
+      cur_max_var_id = MAX(cur_max_var_id, static_cast<int64_t>(SYS_VAR_OB_BMW_TOPK_RESERVE_RATIO)) ;
+      ObSysVarsIdToArrayIdx[SYS_VAR_OB_BMW_TOPK_RESERVE_RATIO] = 838 ;
+      ObSysVars[838].base_value_ = "150" ;
+    ObSysVars[838].alias_ = "OB_SV_BMW_TOPK_RESERVE_RATIO" ;
+    }();
+
     if (cur_max_var_id >= ObSysVarFactory::OB_MAX_SYS_VAR_ID) { 
       HasInvalidSysVar = true;
     }
   }
 }vars_init;
 
-static int64_t var_amount = 838;
+static int64_t var_amount = 839;
 
 ObSysVarClassType ObSysVariables::get_sys_var_id(int64_t i){ return ObSysVars[i].id_;}
 ObString ObSysVariables::get_name(int64_t i){ return ObSysVars[i].name_;}

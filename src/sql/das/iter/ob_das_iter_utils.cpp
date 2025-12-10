@@ -23,6 +23,8 @@
 #include "sql/das/iter/ob_das_spiv_scan_iter.h"
 #include "sql/das/iter/sparse_retrieval/ob_das_tr_merge_iter.h"
 #include "sql/das/iter/sparse_retrieval/ob_das_match_iter.h"
+#include "lib/number/ob_number_v2.h"  // for ObNumber
+#include <cstdlib>  // for std::getenv, std::atoll
 
 namespace oceanbase
 {
@@ -1181,18 +1183,27 @@ int ObDASIterUtils::create_text_retrieval_tree(ObTableScanParam &scan_param,
       ir_scan_ctdef,
       ir_scan_rtdef))) {
     LOG_WARN("fail to find ir scan definition", K(ret));
-  } else if (OB_FAIL(create_text_retrieval_sub_tree(
-      scan_param.ls_id_,
-      alloc,
-      ir_scan_ctdef,
-      ir_scan_rtdef,
-      related_tablet_ids.fts_tablet_ids_.at(ir_scan_rtdef->fts_idx_),
-      false,
-      trans_desc,
-      snapshot,
-      text_retrieval_result))) {
-    LOG_WARN("failed to create text retrieval sub tree", K(ret));
   } else {
+    const ObDASScanCtDef *lookup_scan_ctdef = nullptr;
+    if (has_lookup) {
+      const ObDASTableLookupCtDef *lookup_ctdef = static_cast<const ObDASTableLookupCtDef *>(attach_ctdef);
+      lookup_scan_ctdef = lookup_ctdef->get_lookup_scan_ctdef();
+    }
+    if (OB_FAIL(create_text_retrieval_sub_tree(
+        scan_param.ls_id_,
+        alloc,
+        ir_scan_ctdef,
+        ir_scan_rtdef,
+        related_tablet_ids.fts_tablet_ids_.at(ir_scan_rtdef->fts_idx_),
+        false,
+        trans_desc,
+        snapshot,
+        text_retrieval_result,
+        lookup_scan_ctdef))) {
+      LOG_WARN("failed to create text retrieval sub tree", K(ret));
+    }
+  }
+  if (OB_SUCC(ret)) {
     root_iter = text_retrieval_result;
     if (has_lookup) {
       table_lookup_ctdef = static_cast<const ObDASTableLookupCtDef *>(attach_ctdef);
@@ -1613,6 +1624,175 @@ int ObDASIterUtils::create_match_part_score_sub_tree(ObTableScanParam &scan_para
   return ret;
 }
 
+static int extract_id_range_from_filters(
+    const ExprFixedArray *scalar_filters,
+    ObEvalCtx *eval_ctx,
+    int64_t &id_lower_bound,
+    int64_t &id_upper_bound,
+    common::ObIArray<int64_t> *id_in_list = nullptr)
+{
+  int ret = OB_SUCCESS;
+  id_lower_bound = 0;
+  id_upper_bound = -1;
+  const ExprFixedArray &filters = *scalar_filters;
+  if (filters.empty()) {
+    return ret;
+  }
+  for (int64_t i = 0; i < filters.count(); ++i) {
+    const ObExpr *expr = filters.at(i);
+    if (OB_ISNULL(expr)) {
+      continue;
+    }
+    if (expr->type_ == T_OP_IN && OB_NOT_NULL(id_in_list)) {
+      LOG_DEBUG("[Scalar Filter] IN operator detected but not yet supported for pushdown",
+                "expr_type", expr->type_);
+      continue;
+    }
+    bool is_comparison = false;
+    bool is_less_than = false;
+    bool is_greater_than = false;
+    bool include_equal = false;
+    switch (expr->type_) {
+      case T_OP_LT:  // <
+        is_comparison = true;
+        is_less_than = true;
+        include_equal = false;
+        break;
+      case T_OP_LE:  // <=
+        is_comparison = true;
+        is_less_than = true;
+        include_equal = true;
+        break;
+      case T_OP_GT:  // >
+        is_comparison = true;
+        is_greater_than = true;
+        include_equal = false;
+        break;
+      case T_OP_GE:  // >=
+        is_comparison = true;
+        is_greater_than = true;
+        include_equal = true;
+        break;
+      default:
+        break;
+    }
+    if (!is_comparison) {
+      continue;
+    }
+    if (expr->arg_cnt_ != 2 || OB_ISNULL(expr->args_)) {
+      continue;
+    }
+    const ObExpr *left_expr = expr->args_[0];
+    const ObExpr *right_expr = expr->args_[1];
+    if (OB_ISNULL(left_expr) || OB_ISNULL(right_expr)) {
+      continue;
+    }
+    const ObExpr *col_expr = nullptr;
+    const ObExpr *const_expr = nullptr;
+    bool col_on_left = false;
+    if (left_expr->type_ == T_REF_COLUMN && right_expr->is_const_expr()) {
+      col_expr = left_expr;
+      const_expr = right_expr;
+      col_on_left = true;
+    } else if (right_expr->type_ == T_REF_COLUMN && left_expr->is_const_expr()) {
+      col_expr = right_expr;
+      const_expr = left_expr;
+      col_on_left = false;
+      if (is_less_than) {
+        is_less_than = false;
+        is_greater_than = true;
+      } else if (is_greater_than) {
+        is_greater_than = false;
+        is_less_than = true;
+      }
+    } else {
+      continue;
+    }
+    int64_t const_value = 0;
+    bool value_extracted = false;
+    if (OB_NOT_NULL(eval_ctx) && const_expr->is_const_expr()) {
+      ObDatum *datum = nullptr;
+      int tmp_ret = const_expr->eval(*eval_ctx, datum);
+      if (OB_SUCCESS == tmp_ret && OB_NOT_NULL(datum) && !datum->is_null()) {
+        ObObjType obj_type = const_expr->datum_meta_.type_;
+        if (obj_type == ObTinyIntType || obj_type == ObSmallIntType || 
+            obj_type == ObMediumIntType || obj_type == ObInt32Type || 
+            obj_type == ObIntType) {
+          const_value = datum->get_int();
+          value_extracted = true;
+        } else if (obj_type == ObUTinyIntType || obj_type == ObUSmallIntType || 
+                   obj_type == ObUMediumIntType || obj_type == ObUInt32Type || 
+                   obj_type == ObUInt64Type) {
+          uint64_t uval = datum->get_uint64();
+          if (uval <= static_cast<uint64_t>(INT64_MAX)) {
+            const_value = static_cast<int64_t>(uval);
+            value_extracted = true;
+          } else {
+            LOG_WARN("[Scalar Filter] Unsigned value overflow, skipping",
+                     K(uval), "max_int64", INT64_MAX);
+          }
+        } else if (obj_type == ObNumberType) {
+          number::ObNumber nmb(datum->get_number());
+          if (nmb.is_valid_int64(const_value)) {
+            value_extracted = true;
+          }
+        } else if (obj_type == ObFloatType || obj_type == ObDoubleType) {
+          double dval = (obj_type == ObFloatType) ? 
+                        static_cast<double>(datum->get_float()) : 
+                        datum->get_double();
+          const_value = static_cast<int64_t>(dval);
+          value_extracted = true;
+          LOG_DEBUG("[Scalar Filter] Float/Double converted to int",
+                    K(dval), K(const_value));
+        }
+      } else {
+        LOG_DEBUG("[Scalar Filter] Failed to evaluate constant expression",
+                  K(tmp_ret), "has_datum", (datum != nullptr),
+                  "is_null", (datum != nullptr && datum->is_null()));
+      }
+    }
+    if (!value_extracted) {
+      LOG_DEBUG("[Scalar Filter] Failed to extract constant value",
+                "filter_idx", i,
+                "const_type", const_expr->datum_meta_.type_,
+                "has_eval_ctx", (eval_ctx != nullptr));
+      continue;
+    }
+    if (is_less_than) {
+      int64_t new_upper = include_equal ? const_value : (const_value - 1);
+      if (id_upper_bound == -1 || new_upper < id_upper_bound) {
+        id_upper_bound = new_upper;
+        LOG_DEBUG("[Scalar Filter] Updated upper bound",
+                  K(const_value), K(include_equal), K(new_upper));
+      }
+    } else if (is_greater_than) {
+      int64_t new_lower = include_equal ? const_value : (const_value + 1);
+      if (new_lower > id_lower_bound) {
+        id_lower_bound = new_lower;
+        LOG_DEBUG("[Scalar Filter] Updated lower bound",
+                  K(const_value), K(include_equal), K(new_lower));
+      }
+    }
+    LOG_DEBUG("[Scalar Filter] Successfully extracted filter",
+              "filter_idx", i,
+              "op_type", expr->type_,
+              K(const_value),
+              K(is_less_than),
+              K(is_greater_than),
+              K(include_equal),
+              K(id_lower_bound),
+              K(id_upper_bound));
+  }
+  if (id_lower_bound > 0 || id_upper_bound >= 0) {
+    LOG_INFO("[Scalar Filter] Filter extraction completed with results",
+            K(filters.count()), K(id_lower_bound), K(id_upper_bound));
+  } else {
+    LOG_DEBUG("[Scalar Filter] No valid ID range filters found",
+              K(filters.count()));
+  }  
+  return ret;
+}
+
 int ObDASIterUtils::create_text_retrieval_sub_tree(
     const ObLSID &ls_id,
     common::ObIAllocator &alloc,
@@ -1622,7 +1802,8 @@ int ObDASIterUtils::create_text_retrieval_sub_tree(
     const bool is_func_lookup,
     transaction::ObTxDesc *trans_desc,
     transaction::ObTxReadSnapshot *snapshot,
-    ObDASIter *&retrieval_result)
+    ObDASIter *&retrieval_result,
+    const ObDASScanCtDef *lookup_scan_ctdef)
 {
   int ret = OB_SUCCESS;
   ObExpr *search_text = ir_scan_ctdef->search_text_;
@@ -1674,6 +1855,28 @@ int ObDASIterUtils::create_text_retrieval_sub_tree(
     }
     if (OB_SUCC(ret) && ir_scan_ctdef->has_pushdown_topk() && has_duplicate_boolean_tokens) {
       FLOG_INFO("disable pushdown topk since boolean query has duplicate tokens", K(merge_iter_param.topk_mode_));
+    }
+  }
+  if (OB_SUCC(ret) && merge_iter_param.topk_mode_) {
+    merge_iter_param.id_lower_bound_ = 0;
+    merge_iter_param.id_upper_bound_ = -1;
+    if (OB_SUCC(ret)) {
+      int64_t extracted_lower = 0;
+      int64_t extracted_upper = -1;
+      if (OB_FAIL(extract_id_range_from_filters(
+              &ir_scan_ctdef->scalar_filters_, 
+              ir_scan_rtdef->eval_ctx_,
+              extracted_lower, 
+              extracted_upper,
+              nullptr))) {
+        LOG_WARN("failed to extract id range from filters, using defaults", K(ret));
+        ret = OB_SUCCESS; 
+      } else {
+        if (extracted_lower > 0 || extracted_upper >= 0) {
+          merge_iter_param.id_lower_bound_ = extracted_lower;
+          merge_iter_param.id_upper_bound_ = extracted_upper;
+        }
+      }
     }
   }
   if (FAILEDx(create_das_iter(alloc, merge_iter_param, tr_merge_iter))) {
@@ -4418,4 +4621,3 @@ int ObDASIterUtils::create_vec_ivf_lookup_tree(ObTableScanParam &scan_param,
 
 } // namespace sql
 } // namespace oceanbase
-

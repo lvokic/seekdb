@@ -54,14 +54,33 @@ struct ObTextRetrievalInfo
     doc_token_cnt_(NULL),
     avg_doc_token_cnt_(NULL),
     relevance_expr_(NULL),
-    column_boost_idx_(-1)
+    column_boost_idx_(-1),
+    scalar_filters_()
   { }
   ~ObTextRetrievalInfo() {}
 
-  TO_STRING_KV(K_(match_expr), K_(pushdown_match_filter), K_(sort_key), K_(topk_limit_expr),
-               K_(topk_offset_expr), K_(with_ties), K_(need_calc_relevance), K_(inv_idx_tid),
-               K_(fwd_idx_tid), K_(doc_id_idx_tid), K_(column_boost_idx));
-
+  TO_STRING_KV(K_(match_expr),
+               K_(pushdown_match_filter),
+               K_(sort_key),
+               K_(topk_limit_expr),
+               K_(topk_offset_expr),
+               K_(with_ties),
+               K_(need_calc_relevance),
+               K_(inv_idx_tid),
+               K_(fwd_idx_tid),
+               K_(doc_id_idx_tid),
+               K_(data_table_id),
+               K_(token_column),
+               K_(token_cnt_column),
+               K_(docid_or_rowkey_column),
+               K_(doc_length_column),
+               K_(related_doc_cnt),
+               K_(total_doc_cnt),
+               K_(doc_token_cnt),
+               K_(avg_doc_token_cnt),
+               K_(relevance_expr),
+               K_(column_boost_idx),
+               K_(scalar_filters));
   bool need_sort() const { return sort_key_.expr_ != nullptr; }
   bool need_block_max_scan() const { return need_sort() && nullptr != topk_limit_expr_ && sort_key_.is_descending(); }
   ObMatchFunRawExpr *match_expr_;
@@ -86,7 +105,8 @@ struct ObTextRetrievalInfo
   ObAggFunRawExpr *doc_token_cnt_;  // sum(token_cnt_column) or the number of doc_length_column_
   ObRawExpr *avg_doc_token_cnt_; // avg(token_cnt_column) group by doc_id, average doc length
   ObRawExpr *relevance_expr_; // BM25
-  int column_boost_idx_;
+  int64_t column_boost_idx_;
+  common::ObSEArray<ObRawExpr *, 4, common::ModulePageAllocator, true> scalar_filters_;
 };
 
 struct ObRawFilterMonotonicity
@@ -619,6 +639,14 @@ public:
   inline common::ObIArray<ObRawExpr *> &get_ext_column_convert_exprs()
   { return ext_column_convert_exprs_; }
 
+  inline const common::ObIArray<ObRawExpr *> &get_doc_id_filters() const
+  {
+    static const common::ObSEArray<ObRawExpr *, 0> empty_array;
+    if (OB_NOT_NULL(access_path_)) {
+      return access_path_->domain_idx_info_.doc_id_filters_;
+    }
+    return empty_array;
+  }
   /**
    *  Get pushdown aggr expressions
    */

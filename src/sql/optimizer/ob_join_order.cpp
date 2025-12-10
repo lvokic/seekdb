@@ -19265,6 +19265,7 @@ int ObJoinOrder::process_index_for_match_expr(const uint64_t table_id,
   ObMatchFunRawExpr *match_expr_for_index_scan = nullptr;
   ObSqlSchemaGuard *schema_guard = nullptr;
   const ObTableSchema *index_schema = nullptr;
+  const ObTableSchema *main_table_schema = nullptr;
   bool is_es_match = false;
   if (OB_ISNULL(schema_guard = OPT_CTX.get_sql_schema_guard()) || OB_ISNULL(get_plan()) ||
       OB_ISNULL(get_plan()->get_stmt())) {
@@ -19275,6 +19276,8 @@ int ObJoinOrder::process_index_for_match_expr(const uint64_t table_id,
   } else if (all_match_exprs.empty()) {
     // do nothing
   } else if (OB_FALSE_IT(access_path.domain_idx_info_.set_domain_idx_type(DomainIndexType::FTS_INDEX))) {
+  } else if (OB_FAIL(schema_guard->get_table_schema(ref_table_id, main_table_schema))) {
+    LOG_WARN("failed to get main table schema", K(ret), K(table_id));
   } else if (OB_FAIL(schema_guard->get_table_schema(index_id, index_schema))) {
     LOG_WARN("failed to get index table schema", K(ret), K(index_id));
   } else if (OB_ISNULL(index_schema)) {
@@ -19395,6 +19398,28 @@ int ObJoinOrder::process_index_for_match_expr(const uint64_t table_id,
       LOG_WARN("failed to append inverted index table id", K(ret));
     } else {
       match_expr_for_index_scan = match_expr_info->match_expr_;
+      // collect scalar filters
+      for (int64_t i = 0; OB_SUCC(ret) && i < helper.filters_.count(); ++i) {
+        ObRawExpr *filter = helper.filters_.at(i);
+        if (OB_ISNULL(filter)) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("unexpected null filter", K(ret));
+        } else if (!filter->has_flag(CNT_MATCH_EXPR)) {
+          bool is_doc_id_filter = false;
+          if (OB_FAIL(check_is_doc_id_filter(filter, main_table_schema, is_doc_id_filter))) {
+            LOG_WARN("failed to check is doc id filter", K(ret), KPC(filter));
+          }
+          if (is_doc_id_filter) {
+            if (OB_FAIL(access_path.domain_idx_info_.doc_id_filters_.push_back(filter))) {
+              LOG_WARN("failed to append doc id filter", K(ret));
+            }
+          } else {
+            if (OB_FAIL(access_path.domain_idx_info_.index_scan_filters_.push_back(filter))) {
+              LOG_WARN("failed to append scalar filter", K(ret));
+            }
+          }
+        }
+      }
     }
   }
 
@@ -19448,6 +19473,10 @@ int ObJoinOrder::init_basic_text_retrieval_info(uint64_t table_id,
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected null partition info", K(ret));
   } else {
+    const ObTableSchema *main_table_schema = NULL;
+    if (OB_FAIL(schema_guard->get_table_schema(ref_table_id, main_table_schema))) {
+      LOG_WARN("failed to get main table schema", K(ret), K(table_id));
+    } 
     // generate selectivity info for each match against expr
     bool is_es_match = false;
     for (int64_t i = 0; OB_SUCC(ret) && i < match_exprs.count(); ++i) {
@@ -19489,25 +19518,48 @@ int ObJoinOrder::init_basic_text_retrieval_info(uint64_t table_id,
                                                        range_columns,
                                                        tmp_match_expr_info.query_range_))) {
             LOG_WARN("failed to get range of query tokens", K(ret));
-          } else if (OB_FAIL(estimate_fts_index_scan(table_id,
-                                                     ref_table_id,
-                                                     inv_idx_tids.at(j),
-                                                     partition_info,
-                                                     index_schema,
-                                                     tmp_match_expr_info.query_range_,
-                                                     tmp_match_expr_info.query_range_row_count_,
-                                                     tmp_match_expr_info.selectivity_))) {
-            LOG_WARN("failed to estimate fts index scan", K(ret));
-          } else if (OB_FALSE_IT(tmp_match_expr_info.match_expr_ = match_expr)) {
-          } else if (OB_FALSE_IT(tmp_match_expr_info.inv_idx_id_ = inv_idx_tids.at(j))) {
-          } else if (OB_FAIL(helper.match_expr_infos_.push_back(tmp_match_expr_info))) {
-            LOG_WARN("failed to push back match expr info", K(ret));
-            // add selectivity infos of match against exprs to LogPlan
-          } else if (OB_FAIL(get_plan()->get_predicate_selectivities().
-                             push_back(ObExprSelPair(match_expr, tmp_match_expr_info.selectivity_)))) {
-            LOG_WARN("failed to push back predicate selectivities", K(ret));
           } else {
-            range_columns.reset();
+            // [NEW] Extract doc id filters for cost estimation
+            ObSEArray<ObRawExpr*, 4> doc_id_filters;
+            for (int64_t k = 0; OB_SUCC(ret) && k < helper.filters_.count(); ++k) {
+              ObRawExpr *filter = helper.filters_.at(k);
+              if (OB_ISNULL(filter)) {
+                ret = OB_ERR_UNEXPECTED;
+                LOG_WARN("unexpected null filter", K(ret));
+              } else if (!filter->has_flag(CNT_MATCH_EXPR)) {
+                bool is_doc_id_filter = false;
+                if (OB_FAIL(check_is_doc_id_filter(filter, main_table_schema, is_doc_id_filter))) {
+                   LOG_WARN("failed to check is doc id filter", K(ret), KPC(filter));
+                } else if (is_doc_id_filter) {
+                  if (OB_FAIL(doc_id_filters.push_back(filter))) {
+                    LOG_WARN("failed to push back doc id filter", K(ret));
+                  }
+                }
+              }
+            }
+            if (OB_SUCC(ret)) {
+              if (OB_FAIL(estimate_fts_index_scan(table_id,
+                                                  ref_table_id,
+                                                  inv_idx_tids.at(j),
+                                                  partition_info,
+                                                  index_schema,
+                                                  tmp_match_expr_info.query_range_,
+                                                  tmp_match_expr_info.query_range_row_count_,
+                                                  tmp_match_expr_info.selectivity_,
+                                                  doc_id_filters))) { // [NEW] Pass doc_id_filters
+                LOG_WARN("failed to estimate fts index scan", K(ret));
+              } else if (OB_FALSE_IT(tmp_match_expr_info.match_expr_ = match_expr)) {
+              } else if (OB_FALSE_IT(tmp_match_expr_info.inv_idx_id_ = inv_idx_tids.at(j))) {
+              } else if (OB_FAIL(helper.match_expr_infos_.push_back(tmp_match_expr_info))) {
+                LOG_WARN("failed to push back match expr info", K(ret));
+                // add selectivity infos of match against exprs to LogPlan
+              } else if (OB_FAIL(get_plan()->get_predicate_selectivities().
+                                 push_back(ObExprSelPair(match_expr, tmp_match_expr_info.selectivity_)))) {
+                LOG_WARN("failed to push back predicate selectivities", K(ret));
+              } else {
+                range_columns.reset();
+              }
+            }
           }
         }
       } else if (is_es_match) {
@@ -19533,23 +19585,47 @@ int ObJoinOrder::init_basic_text_retrieval_info(uint64_t table_id,
                                                    range_columns,
                                                    match_expr_info.query_range_))) {
         LOG_WARN("failed to get range of query tokens", K(ret));
-      } else if (OB_FAIL(estimate_fts_index_scan(table_id,
-                                                 ref_table_id,
-                                                 index_id,
-                                                 partition_info,
-                                                 index_schema,
-                                                 match_expr_info.query_range_,
-                                                 match_expr_info.query_range_row_count_,
-                                                 match_expr_info.selectivity_))) {
-        LOG_WARN("failed to estimate fts index scan", K(ret));
-      } else if (OB_FALSE_IT(match_expr_info.match_expr_ = match_expr)) {
-      } else if (OB_FALSE_IT(match_expr_info.inv_idx_id_ = index_id)) {
-      } else if (OB_FAIL(helper.match_expr_infos_.push_back(match_expr_info))) {
-        LOG_WARN("failed to push back match expr info", K(ret));
-        // add selectivity infos of match against exprs to LogPlan
-      } else if (OB_FAIL(get_plan()->get_predicate_selectivities().
-                         push_back(ObExprSelPair(match_expr, match_expr_info.selectivity_)))) {
-        LOG_WARN("failed to push back predicate selectivities", K(ret));
+      } else {
+         // [NEW] Extract doc id filters for cost estimation
+         ObSEArray<ObRawExpr*, 4> doc_id_filters;
+         for (int64_t k = 0; OB_SUCC(ret) && k < helper.filters_.count(); ++k) {
+           ObRawExpr *filter = helper.filters_.at(k);
+           if (OB_ISNULL(filter)) {
+             ret = OB_ERR_UNEXPECTED;
+             LOG_WARN("unexpected null filter", K(ret));
+           } else if (!filter->has_flag(CNT_MATCH_EXPR)) {
+             bool is_doc_id_filter = false;
+             if (OB_FAIL(check_is_doc_id_filter(filter, main_table_schema, is_doc_id_filter))) {
+                LOG_WARN("failed to check is doc id filter", K(ret), KPC(filter));
+             } else if (is_doc_id_filter) {
+               if (OB_FAIL(doc_id_filters.push_back(filter))) {
+                 LOG_WARN("failed to push back doc id filter", K(ret));
+               }
+             }
+           }
+         }
+         
+         if (OB_SUCC(ret)) {
+           if (OB_FAIL(estimate_fts_index_scan(table_id,
+                                               ref_table_id,
+                                               index_id,
+                                               partition_info,
+                                               index_schema,
+                                               match_expr_info.query_range_,
+                                               match_expr_info.query_range_row_count_,
+                                               match_expr_info.selectivity_,
+                                               doc_id_filters))) { // [NEW] Pass doc_id_filters
+             LOG_WARN("failed to estimate fts index scan", K(ret));
+           } else if (OB_FALSE_IT(match_expr_info.match_expr_ = match_expr)) {
+           } else if (OB_FALSE_IT(match_expr_info.inv_idx_id_ = index_id)) {
+           } else if (OB_FAIL(helper.match_expr_infos_.push_back(match_expr_info))) {
+             LOG_WARN("failed to push back match expr info", K(ret));
+             // add selectivity infos of match against exprs to LogPlan
+           } else if (OB_FAIL(get_plan()->get_predicate_selectivities().
+                              push_back(ObExprSelPair(match_expr, match_expr_info.selectivity_)))) {
+             LOG_WARN("failed to push back predicate selectivities", K(ret));
+           }
+         }
       }
     }
     LOG_TRACE("OPT: selectivity infos of match exprs", K(helper.match_expr_infos_));
@@ -19889,7 +19965,8 @@ int ObJoinOrder::estimate_fts_index_scan(uint64_t table_id,
                                          const ObTableSchema *index_schema,
                                          ObQueryRangeProvider *query_range,
                                          int64_t &query_range_row_count,
-                                         double &selectivity)
+                                         double &selectivity,
+                                         const ObIArray<ObRawExpr*> &doc_id_filters)
 {
   int ret = OB_SUCCESS;
   ObTableMetaInfo table_meta_range(index_id);
@@ -19955,8 +20032,25 @@ int ObJoinOrder::estimate_fts_index_scan(uint64_t table_id,
         LOG_WARN("failed to estimate table range rowcount", K(ret));
       } else {
         query_range_row_count = table_meta_range.table_row_count_;
+        double doc_id_sel = 1.0;
+        if (!doc_id_filters.empty()) {
+          if (OB_FAIL(ObOptSelectivity::calculate_selectivity(
+                  get_plan()->get_basic_table_metas(),
+                  get_plan()->get_selectivity_ctx(),
+                  doc_id_filters,
+                  doc_id_sel,
+                  get_plan()->get_predicate_selectivities()))) {
+            LOG_WARN("failed to calculate filter selectivity", K(ret));
+            ret = OB_SUCCESS;
+          }
+        }
+        if (doc_id_sel < 1.0 && doc_id_sel > 0.0) {
+          double reduced_rows = static_cast<double>(query_range_row_count) * doc_id_sel;
+          query_range_row_count = static_cast<int64_t>(std::max(1.0, reduced_rows));
+        }
         selectivity = get_table_meta().table_row_count_ == 0 ? 0 :
                       table_meta_range.table_row_count_ * 1.0 / get_table_meta().table_row_count_;
+        selectivity = selectivity * doc_id_sel;
         // refine selectivity
         selectivity = std::min(selectivity, 1.0);
       }
@@ -20228,6 +20322,51 @@ int ObJoinOrder::has_valid_match_filter_on_index(PathHelper &helper, uint64_t ti
       }
     }
   }
+  return ret;
+}
+
+int ObJoinOrder::check_is_doc_id_filter(const ObRawExpr *filter,
+                                        const ObTableSchema *index_schema,
+                                        bool &is_doc_id_filter)
+{
+  int ret = OB_SUCCESS;
+  is_doc_id_filter = false;
+  if (OB_ISNULL(filter) || OB_ISNULL(index_schema)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null param", K(ret), K(filter), K(index_schema));
+  } else {
+    ObItemType type = filter->get_expr_type();
+    bool is_range_op = (type == T_OP_EQ || type == T_OP_LE || type == T_OP_LT ||
+                        type == T_OP_GE || type == T_OP_GT || type == T_OP_BTW);
+    if (!is_range_op) {
+      return ret; 
+    }
+    const ObRawExpr *left = filter->get_param_expr(0);
+    const ObRawExpr *right = (filter->get_param_count() > 1) ? filter->get_param_expr(1) : nullptr;
+    const ObColumnRefRawExpr *col_expr = nullptr;
+    bool has_const_param = false;
+    if (OB_ISNULL(left) || (type != T_OP_BTW && OB_ISNULL(right))) {
+      return ret;
+    }
+    if (left->is_column_ref_expr()) {
+      col_expr = static_cast<const ObColumnRefRawExpr*>(left);
+      if (type == T_OP_BTW) {
+        has_const_param = filter->get_param_expr(1)->is_const_expr() && 
+                          filter->get_param_expr(2)->is_const_expr();
+      } else {
+        has_const_param = right->is_const_expr() || right->is_dynamic_const_expr();
+      }
+    } else if (right != nullptr && right->is_column_ref_expr()) {
+      col_expr = static_cast<const ObColumnRefRawExpr*>(right);
+      has_const_param = left->is_const_expr() || left->is_dynamic_const_expr();
+    }
+    if (col_expr == nullptr || !has_const_param) {
+      // 如果不是 列 vs 常量 的形式，或者是 列 vs 列，不支持下推
+      return ret;
+    }
+    is_doc_id_filter = true;
+  }
+
   return ret;
 }
 

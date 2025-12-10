@@ -80,7 +80,8 @@ public:
       avg_doc_len_est_spec_(alloc),
       mode_flag_(NATURAL_LANGUAGE_MODE),
       flags_(0),
-      field_boost_expr_(nullptr) {}
+      field_boost_expr_(nullptr),
+      scalar_filters_(alloc) {}
   bool need_calc_relevance() const { return nullptr != relevance_expr_; }
   bool need_proj_relevance_score() const { return nullptr != relevance_proj_col_; }
   bool need_fwd_idx_agg() const { return has_fwd_agg_ && need_calc_relevance(); }
@@ -206,6 +207,7 @@ public:
     };
   };
   ObExpr *field_boost_expr_;
+  ExprFixedArray scalar_filters_;
 };
 
 struct ObDASIRScanRtDef : ObDASAttachRtDef
