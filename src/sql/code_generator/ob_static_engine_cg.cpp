@@ -5193,62 +5193,6 @@ int ObStaticEngineCG::generate_normal_tsc(ObLogTableScan &op, ObTableScanSpec &s
             ir_ctdef = static_cast<ObDASIRScanCtDef*>(curr_node);
           }
           if (OB_NOT_NULL(ir_ctdef)) {
-            uint64_t scalar_idx_tid = op.get_scalar_index_tid();
-            if (scalar_idx_tid != common::OB_INVALID_ID) {
-              void *buf = phy_plan_->get_allocator().alloc(sizeof(ObDASScanCtDef));
-              if (OB_ISNULL(buf)) {
-                ret = OB_ALLOCATE_MEMORY_FAILED;
-                LOG_WARN("failed to alloc side ctdef", K(ret));
-              } else {
-                // 2. 构造 CtDef
-                ObDASScanCtDef *side_ctdef = new(buf) ObDASScanCtDef(phy_plan_->get_allocator());    
-                // 3. 填充基础元数据
-                side_ctdef->ref_table_id_ = scalar_idx_tid; // 物理表 ID
-                side_ctdef->is_get_ = false;                // Range Scan    
-                // 4. 获取索引 Schema 以填充 schema_version 和 projection
-                const share::schema::ObTableSchema *idx_schema = nullptr;
-                if (OB_FAIL(schema_guard->get_table_schema(scalar_idx_tid, idx_schema))) {
-                  LOG_WARN("failed to get index schema", K(ret), K(scalar_idx_tid));
-                } else if (OB_ISNULL(idx_schema)) {
-                  ret = OB_ERR_UNEXPECTED;
-                } else {
-                  side_ctdef->schema_version_ = idx_schema->get_schema_version();                
-                  // 5. 设置列投影 (Projection)
-                  // 我们需要读取索引的 Rowkey (通常包含主键 DocID)
-                  // idx_base_id(base_id) -> Rowkey: <base_id, doc_id>
-                  const common::ObRowkeyInfo &rowkey_info = idx_schema->get_rowkey_info();
-                  if (OB_FAIL(side_ctdef->access_column_ids_.init(rowkey_info.get_size()))) {
-                    LOG_WARN("failed to init access column ids", K(ret), K(rowkey_info.get_size()));
-                  } else {
-                    for (int k = 0; OB_SUCC(ret) && k < rowkey_info.get_size(); ++k) {
-                      uint64_t col_id = common::OB_INVALID_ID;
-                      if (OB_FAIL(rowkey_info.get_column_id(k, col_id))) {
-                        LOG_WARN("failed to get column id", K(ret));
-                      } else if (OB_FAIL(side_ctdef->access_column_ids_.push_back(col_id))) {
-                        LOG_WARN("failed to push back column id", K(ret));
-                      }
-                    }
-                  }
-                }
-                if (OB_SUCC(ret)) {
-                  common::ObIAllocator &allocator = phy_plan_->get_allocator();
-                  sql::ObStoragePushdownFlag default_pd_flag;
-                  if (OB_FAIL(side_ctdef->table_param_.convert(
-                              *idx_schema,
-                              side_ctdef->access_column_ids_,
-                              default_pd_flag,
-                              nullptr,
-                              false))) {
-                    LOG_WARN("failed to convert table param for side scan", K(ret));
-                  }
-                }
-                // 6. 挂载到 FTS 的 CtDef 上
-                if (OB_SUCC(ret)) {
-                  ir_ctdef->scalar_index_ctdef_ = side_ctdef;
-                  LOG_TRACE("CodeGen: Generated Side-Scan CtDef", K(scalar_idx_tid));
-                }
-              }
-            }
             const ObIArray<ObRawExpr *> &doc_id_filters = op.get_doc_id_filters();
             const ObIArray<ObRawExpr *> &scalar_filters = op.get_scalar_filters();
             int64_t total_count = doc_id_filters.count() + scalar_filters.count();

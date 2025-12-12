@@ -73,7 +73,7 @@ cd Flamegraph
 echo "Flamegraph has been generated: flamegraph.svg"
 
 kill -9 $(pidof observer)
-bash build.sh debug -DOB_USE_CCACHE=ON --init --make -j8
+bash build.sh debug -DOB_USE_CCACHE=ON --init --make -j3
 cp build_debug/src/observer/observer ~/seekdb/bin
 
 ./bin/observer
