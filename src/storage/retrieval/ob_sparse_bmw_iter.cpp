@@ -907,10 +907,9 @@ int ObSRBMWIterImpl::advance_dim_iters_for_next_round(
 int ObSRBMWIterImpl::init_two_phase_config()
 {
   int ret = OB_SUCCESS;
-  // Enable two-phase optimization if reserve count is specified
   two_phase_config_.enabled_ = (top_k_count_ > baseline_top_k_count_);
   if (two_phase_config_.enabled_) {
-    two_phase_config_.baseline_ratio_ = 1.0;  // Use full baseline count
+    two_phase_config_.baseline_ratio_ = 1.0;
     two_phase_config_.reserve_ratio_ = static_cast<double>(top_k_count_) / baseline_top_k_count_;
     two_phase_config_.use_adaptive_threshold_ = true;
     two_phase_config_.min_baseline_count_ = 10;
@@ -923,27 +922,16 @@ int ObSRBMWIterImpl::init_two_phase_config()
 int ObSRBMWIterImpl::execute_phase1_baseline()
 {
   int ret = OB_SUCCESS;
-  
   if (!should_use_two_phase()) {
-    // Skip if two-phase not enabled
     is_phase1_completed_ = true;
     return ret;
   }
-  
-  LOG_DEBUG("[Two-Phase] Executing Phase 1 - Baseline collection");
-  
-  // Phase 1 is actually done in build_top_k_heap()
-  // Record statistics and calculate baseline metrics
   if (baseline_top_k_count_ > 0 && !top_k_heap_.empty()) {
     two_phase_stats_.phase1_row_count_ = MIN(top_k_heap_.count(), baseline_top_k_count_);
     two_phase_stats_.phase1_min_score_ = baseline_min_score_;
-    
-    // Calculate max and average scores from baseline
     double max_score = -DBL_MAX;
     double sum_score = 0.0;
     int64_t valid_count = 0;
-    
-    // Iterate through baseline results to compute statistics
     for (int64_t i = 0; i < baseline_top_k_count_ && i < baseline_relevances_.count(); ++i) {
       const double score = baseline_relevances_.at(i);
       if (score > max_score) {
@@ -952,17 +940,13 @@ int ObSRBMWIterImpl::execute_phase1_baseline()
       sum_score += score;
       ++valid_count;
     }
-    
     if (valid_count > 0) {
       two_phase_stats_.phase1_max_score_ = max_score;
       two_phase_stats_.phase1_avg_score_ = sum_score / valid_count;
     }
-    
     is_phase1_completed_ = true;
-    
     LOG_DEBUG("[Two-Phase] Phase 1 completed with enhanced stats", K_(two_phase_stats));
   }
-  
   return ret;
 }
 
@@ -979,12 +963,9 @@ int ObSRBMWIterImpl::execute_phase2_bmw()
 double ObSRBMWIterImpl::get_adaptive_threshold() const
 {
   double threshold = baseline_min_score_;
-  
   if (should_use_two_phase() && two_phase_config_.use_adaptive_threshold_) {
-    // Adaptive threshold based on collected rows ratio
     const int64_t collected = top_k_heap_.count();
     if (collected > baseline_top_k_count_) {
-      // If we've collected enough in phase 2, use current heap threshold
       const double current_threshold = get_top_k_threshold();
       threshold = MAX(baseline_min_score_, current_threshold);
     }
@@ -995,24 +976,17 @@ double ObSRBMWIterImpl::get_adaptive_threshold() const
 int ObSRBMWIterImpl::merge_baseline_and_phase2_results()
 {
   int ret = OB_SUCCESS;
-  
   if (!should_use_two_phase()) {
     return ret;
   }
-  
-  // Check if we need to fallback to baseline results
   const int64_t phase2_count = top_k_heap_.count() - baseline_top_k_count_;
-  
   if (phase2_count < 0) {
-    // Not enough results in phase 2, need to use baseline
     two_phase_stats_.fallback_count_++;
     LOG_DEBUG("[Two-Phase] Fallback to baseline results", 
         K(phase2_count), K_(baseline_top_k_count));
   }
-  
   two_phase_stats_.phase2_row_count_ = MAX(0, phase2_count);
   two_phase_stats_.final_threshold_ = get_top_k_threshold();
-  
   return ret;
 }
 
@@ -1021,7 +995,6 @@ void ObSRBMWIterImpl::update_two_phase_stats()
   if (should_use_two_phase()) {
     two_phase_stats_.final_threshold_ = MAX(baseline_min_score_, get_top_k_threshold());
     two_phase_stats_.selectivity_ratio_ = calculate_selectivity_ratio();
-    
     LOG_DEBUG("[Two-Phase Stats] Final statistics", K_(two_phase_stats),
         K_(baseline_top_k_count), K_(top_k_count), K(top_k_heap_.count()));
   }
@@ -1032,31 +1005,21 @@ bool ObSRBMWIterImpl::should_terminate_phase2_early() const
   if (!should_use_two_phase() || !is_phase1_completed_) {
     return false;
   }
-  
-  // Early termination conditions:
-  // 1. Already collected enough rows (>= reserve count)
   const int64_t collected = top_k_heap_.count();
   const bool enough_rows = collected >= top_k_count_;
-  
-  // 2. Current threshold significantly higher than baseline (good quality)
   const double current_threshold = get_top_k_threshold();
   const double threshold_ratio = baseline_min_score_ > 0 
       ? current_threshold / baseline_min_score_ 
       : 1.0;
-  const bool high_quality = threshold_ratio > 1.5;  // 50% higher than baseline
-  
-  // 3. High pruning efficiency (most pivots are being pruned)
+  const bool high_quality = threshold_ratio > 1.5;
   const double pruning_ratio = two_phase_stats_.get_pruning_ratio();
   const bool efficient_pruning = pruning_ratio > 0.7;  // >70% pruned
-  
   const bool should_terminate = enough_rows && (high_quality || efficient_pruning);
-  
   if (should_terminate) {
     LOG_DEBUG("[Two-Phase] Early termination triggered", 
         K(collected), K(current_threshold), K_(baseline_min_score), 
         K(threshold_ratio), K(pruning_ratio));
   }
-  
   return should_terminate;
 }
 
@@ -1065,34 +1028,22 @@ double ObSRBMWIterImpl::predict_optimal_threshold() const
   if (!should_use_two_phase() || !is_phase1_completed_) {
     return baseline_min_score_;
   }
-  
-  // Predict optimal threshold based on phase 1 statistics
-  // Use a weighted average between min and avg scores
   const double min_score = two_phase_stats_.phase1_min_score_;
   const double avg_score = two_phase_stats_.phase1_avg_score_;
   const double max_score = two_phase_stats_.phase1_max_score_;
-  
-  // If scores are tightly clustered, use aggressive threshold
   const double score_range = max_score - min_score;
   const double avg_deviation = avg_score - min_score;
-  
   double predicted_threshold = min_score;
-  
   if (avg_deviation > 0 && score_range > 0) {
-    // If scores are spread out, use a more conservative threshold
     const double spread_ratio = avg_deviation / score_range;
     if (spread_ratio < 0.3) {
-      // Tightly clustered near min - be aggressive
       predicted_threshold = min_score * 1.1;  // 10% above baseline
     } else if (spread_ratio < 0.6) {
-      // Moderate spread - balanced approach
       predicted_threshold = (min_score + avg_score) / 2.0;
     } else {
-      // Wide spread - conservative
       predicted_threshold = min_score;
     }
   }
-  
   LOG_DEBUG("[Two-Phase] Predicted optimal threshold", 
       K(predicted_threshold), K(min_score), K(avg_score), K(max_score));
   
@@ -1104,29 +1055,18 @@ void ObSRBMWIterImpl::adjust_threshold_dynamically()
   if (!should_use_two_phase() || !is_phase1_completed_) {
     return;
   }
-  
-  // Dynamically adjust threshold based on current performance
   const int64_t collected = top_k_heap_.count();
   const int64_t target = top_k_count_;
-  
   if (collected < baseline_top_k_count_) {
-    // Still in baseline phase, no adjustment needed
     return;
   }
-  
-  // Calculate collection progress
   const double progress = static_cast<double>(collected - baseline_top_k_count_) 
                          / (target - baseline_top_k_count_);
-  
-  // If progress is slow and pruning ratio is low, consider relaxing threshold
   const double pruning_ratio = two_phase_stats_.get_pruning_ratio();
-  
   if (progress < 0.5 && pruning_ratio < 0.3) {
-    // Low progress and low pruning - might need to relax threshold
     LOG_DEBUG("[Two-Phase] Slow progress detected, considering threshold adjustment",
         K(progress), K(pruning_ratio), K(collected), K(target));
   } else if (progress > 0.8 && pruning_ratio > 0.6) {
-    // Good progress and high pruning - can be more aggressive
     LOG_DEBUG("[Two-Phase] Good progress, maintaining aggressive pruning",
         K(progress), K(pruning_ratio));
   }
@@ -1137,7 +1077,6 @@ double ObSRBMWIterImpl::calculate_selectivity_ratio() const
   const int64_t total = two_phase_stats_.phase2_total_pivots_;
   const int64_t pruned = two_phase_stats_.phase2_pivot_pruned_count_ 
                        + two_phase_stats_.phase2_pruned_count_;
-  
   return total > 0 ? static_cast<double>(pruned) / total : 0.0;
 }
 

@@ -17,6 +17,8 @@
 #define USING_LOG_PREFIX SQL_DAS
 #include "ob_das_tr_merge_iter.h"
 #include "sql/das/ob_das_ir_define.h"
+#include "sql/das/ob_das_scan_op.h"
+#include "share/schema/ob_table_schema.h"
 
 namespace oceanbase
 {
@@ -55,7 +57,8 @@ ObDASTRMergeIter::ObDASTRMergeIter()
     flags_(0),
     check_rangekey_inited_(false),
     inv_idx_tablet_switched_(false),
-    is_inited_(false)
+    is_inited_(false),
+    is_scalar_opt_done_(false)
 {
 }
 
@@ -307,6 +310,349 @@ int ObDASTRMergeIter::init_doc_length_est_param()
   return ret;
 }
 
+int ObDASTRMergeIter::extract_ranges_from_in_expr(
+    const ObExpr *expr,
+    uint64_t table_id,
+    common::ObIArray<common::ObNewRange> &ranges)
+{
+  int ret = OB_SUCCESS;
+  ObExpr **val_args = nullptr;
+  int64_t val_count = 0;
+
+  // 1. 参数校验与提取 (保持不变)
+  if (OB_ISNULL(expr) || OB_UNLIKELY(T_OP_IN != expr->type_)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(ret), KPC(expr));
+  } else if (2 == expr->arg_cnt_) {
+    ObExpr *right_expr = expr->args_[1];
+    if (OB_ISNULL(right_expr)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected null right expr", K(ret));
+    } else if (T_OP_ROW == right_expr->type_) {
+      val_args = right_expr->args_;
+      val_count = right_expr->arg_cnt_;
+    } else {
+      val_args = expr->args_ + 1;
+      val_count = 1;
+    }
+  } else if (expr->arg_cnt_ > 2) {
+    val_args = expr->args_ + 1;
+    val_count = expr->arg_cnt_ - 1;
+  }
+
+  if (OB_FAIL(ret)) {
+  } else if (0 == val_count || OB_ISNULL(val_args)) {
+    // do nothing
+  } else {
+    const int64_t rowkey_cnt = 2; 
+    for (int64_t i = 0; OB_SUCC(ret) && i < val_count; ++i) {
+      ObExpr *val_expr = val_args[i];
+      ObDatum *datum = nullptr;
+      bool got_value = false;
+      ObObj temp_obj;
+      if (OB_ISNULL(val_expr)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected null val expr", K(ret), K(i));
+      } else if (OB_FAIL(val_expr->eval(*ir_rtdef_->eval_ctx_, datum))) {
+        LOG_WARN("failed to eval constant expr", K(ret), K(i));
+        ret = OB_SUCCESS; 
+      } else if (OB_NOT_NULL(datum) && !datum->is_null()) {
+        if (OB_FAIL(datum->to_obj(temp_obj, val_expr->obj_meta_))) {
+          LOG_WARN("failed to convert datum to obj", K(ret));
+        } else {
+          got_value = true;
+        }
+      }
+
+      if (OB_FAIL(ret)) {
+      } else if (OB_UNLIKELY(!got_value)) {
+      } else {
+        void *start_buf = myself_allocator_.alloc(sizeof(ObObj) * rowkey_cnt);
+        void *end_buf = myself_allocator_.alloc(sizeof(ObObj) * rowkey_cnt);
+        
+        if (OB_ISNULL(start_buf) || OB_ISNULL(end_buf)) {
+            ret = OB_ALLOCATE_MEMORY_FAILED;
+            LOG_WARN("failed to alloc obj memory", K(ret));
+        } else {
+            ObObj *start_objs = new(start_buf) ObObj[rowkey_cnt];
+            ObObj *end_objs = new(end_buf) ObObj[rowkey_cnt];
+            start_objs[0] = temp_obj; 
+            end_objs[0] = temp_obj;
+            start_objs[1].set_min_value(); // Start 补 MIN
+            end_objs[1].set_max_value();   // End 补 MAX
+            ObRowkey start_key(start_objs, rowkey_cnt);
+            ObRowkey end_key(end_objs, rowkey_cnt);
+
+            common::ObNewRange range;
+            range.table_id_ = table_id;
+            range.start_key_ = start_key;
+            range.end_key_ = end_key;
+            range.border_flag_.set_inclusive_start();
+            range.border_flag_.set_inclusive_end();
+
+            if (OB_FAIL(ranges.push_back(range))) {
+              LOG_WARN("failed to push back range", K(ret));
+            }
+        }
+      }
+    }
+  }
+  
+  return ret;
+}
+
+int ObDASTRMergeIter::build_scalar_candidate_set()
+{
+  int ret = OB_SUCCESS;
+
+  ObDASScanRtDef scalar_rtdef; 
+  storage::ObTableScanParam *scan_param = nullptr;
+  const share::schema::ObTableSchema *scalar_schema = nullptr;
+  const ObDASScanCtDef *side_ctdef = ir_ctdef_->scalar_index_ctdef_;
+  
+  if (OB_ISNULL(side_ctdef)) { return OB_SUCCESS; }
+  // 校验当前倒排分片是否有效
+  if (!this->inv_idx_tablet_id_.is_valid()) { return OB_SUCCESS; }
+
+  // =================================================================================
+  // [STEP 1] 获取正确的标量索引 Tablet ID (兼容分区表与非分区表)
+  // =================================================================================
+  common::ObTabletID scalar_tablet_id;
+  {
+    share::schema::ObSchemaGetterGuard schema_guard;
+    const share::schema::ObTableSchema *inv_schema = nullptr;
+    const uint64_t tenant_id = MTL_ID();
+    share::schema::ObMultiVersionSchemaService &schema_service_ref = 
+        share::schema::ObMultiVersionSchemaService::get_instance();
+    share::schema::ObMultiVersionSchemaService *schema_service = 
+        &schema_service_ref;
+
+    if (OB_ISNULL(schema_service)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected null schema service", K(ret));
+    } else if (OB_FAIL(schema_service->get_tenant_schema_guard(tenant_id, schema_guard))) {
+      LOG_WARN("failed to get schema guard", K(ret), K(tenant_id));
+    } else if (OB_FAIL(schema_guard.get_table_schema(tenant_id, ir_ctdef_->get_inv_idx_scan_ctdef()->ref_table_id_, inv_schema))) {
+      LOG_WARN("failed to get inverted index schema", K(ret));
+    } else if (OB_FAIL(schema_guard.get_table_schema(tenant_id, side_ctdef->ref_table_id_, scalar_schema))) {
+      LOG_WARN("failed to get scalar index schema", K(ret), K(side_ctdef->ref_table_id_));
+    } else if (OB_ISNULL(inv_schema) || OB_ISNULL(scalar_schema)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected null schema", K(ret), KP(inv_schema), KP(scalar_schema));
+    } else {
+      // 分情况处理分区表和非分区表
+      if (!inv_schema->is_partitioned_table()) {
+        // Case A: 非分区表 (Non-Partitioned)
+        // 逻辑上只有一个 Tablet，直接获取标量索引的 Tablet 列表
+        common::ObArray<common::ObTabletID> tablet_ids;
+        if (OB_FAIL(scalar_schema->get_tablet_ids(tablet_ids))) {
+          LOG_WARN("failed to get scalar tablet ids", K(ret));
+        } else if (OB_UNLIKELY(tablet_ids.count() != 1)) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("unexpected tablet count for non-partitioned table", K(ret), K(tablet_ids));
+        } else {
+          scalar_tablet_id = tablet_ids.at(0);
+        }
+      } else {
+        // Case B: 分区表 (Partitioned)
+        // 需要通过 PartIdx 对齐来查找对应的 Tablet
+        int64_t part_idx = common::OB_INVALID_INDEX;
+        int64_t subpart_idx = common::OB_INVALID_INDEX;
+
+        if (OB_FAIL(inv_schema->get_part_idx_by_tablet(this->inv_idx_tablet_id_, part_idx, subpart_idx))) {
+          LOG_WARN("failed to get part idx by tablet", K(ret), K(this->inv_idx_tablet_id_));
+        } else {
+          common::ObObjectID object_id = common::OB_INVALID_ID;
+          common::ObObjectID first_level_part_id = common::OB_INVALID_ID;
+          
+          if (OB_FAIL(scalar_schema->get_part_id_and_tablet_id_by_idx(
+              part_idx, 
+              subpart_idx, 
+              object_id, 
+              first_level_part_id, 
+              scalar_tablet_id))) {
+            LOG_WARN("failed to get scalar tablet id by idx", K(ret), K(part_idx), K(subpart_idx));
+          }
+        }
+      }
+      if (OB_SUCC(ret)) {
+        LOG_DEBUG("[BMW Scalar] Mapped Tablet ID", 
+            K(ret), 
+            K(this->inv_idx_tablet_id_), 
+            K(scalar_tablet_id), 
+            "is_partitioned", inv_schema->is_partitioned_table());
+      }
+    }
+  }
+  if (OB_FAIL(ret)) {
+    return ret;
+  }
+  // 2. 提取 Range (逻辑保持不变)
+  ObSEArray<common::ObNewRange, 4> ranges;
+  bool found_filter = false;
+  for (int64_t i = 0; OB_SUCC(ret) && i < ir_ctdef_->scalar_filters_.count(); ++i) {
+    const ObExpr *expr = ir_ctdef_->scalar_filters_.at(i);
+    // 这里使用你之前提供的 range 提取函数
+    if (T_OP_IN == expr->type_ || T_OP_EQ == expr->type_) { 
+       if (OB_FAIL(extract_ranges_from_in_expr(expr, side_ctdef->ref_table_id_, ranges))) {
+         LOG_WARN("failed to extract ranges", K(ret));
+       } else if (ranges.count() > 0) {
+         found_filter = true;
+         break;
+       }
+    }
+  }
+  if (OB_SUCC(ret) && (!found_filter || ranges.empty())) { return OB_SUCCESS; }
+
+  // 3. 准备 Candidate Set
+  void *buf = nullptr;
+  storage::ObScalarFilterCandidateSet *candidate_set = nullptr;
+  if (OB_FAIL(ret)) {
+  } else if (OB_ISNULL(buf = myself_allocator_.alloc(sizeof(storage::ObScalarFilterCandidateSet)))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  } else {
+    candidate_set = new(buf) storage::ObScalarFilterCandidateSet();
+    if (OB_FAIL(candidate_set->init(&myself_allocator_, 2048, true))) {
+       LOG_WARN("failed to init candidate set", K(ret));
+    }
+  }
+
+  // 4. 构造 Scan Param
+  if (OB_SUCC(ret)) {
+      if (OB_ISNULL(buf = myself_allocator_.alloc(sizeof(storage::ObTableScanParam)))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        scan_param = new(buf) storage::ObTableScanParam();
+      }
+  }
+
+  if (OB_SUCC(ret)) {
+    const ObDASScanRtDef *main_rtdef = ir_rtdef_->get_inv_idx_scan_rtdef();
+    if (OB_ISNULL(main_rtdef)) {
+        ret = OB_ERR_UNEXPECTED;
+    } else {
+        // 配置 rtdef
+        transaction::ObTxReadSnapshot weak_snapshot;
+        weak_snapshot.reset();
+        weak_snapshot.init_weak_read(share::SCN::max_scn()); 
+
+        scalar_rtdef.timeout_ts_ = main_rtdef->timeout_ts_;
+        scalar_rtdef.sql_mode_ = main_rtdef->sql_mode_;
+        new (&scalar_rtdef.stmt_allocator_) common::ObWrapperAllocatorWithAttr(myself_allocator_);
+        scalar_rtdef.stmt_allocator_.set_attr(lib::ObMemAttr(MTL_ID(), "ScalarScan"));
+        scalar_rtdef.scan_flag_.reset();
+        scalar_rtdef.scan_flag_.read_latest_ = 0;
+        scalar_rtdef.scan_flag_.scan_order_ = ObQueryFlag::Forward;
+        scalar_rtdef.fb_snapshot_ = main_rtdef->fb_snapshot_;
+        scalar_rtdef.fb_read_tx_uncommitted_ = true;
+        scalar_rtdef.tenant_schema_version_ = main_rtdef->tenant_schema_version_;
+        scalar_rtdef.frozen_version_ = -1;
+        scalar_rtdef.need_scn_ = false;
+        scalar_rtdef.limit_param_.limit_ = -1;
+        scalar_rtdef.limit_param_.offset_ = 0;
+        scalar_rtdef.p_pd_expr_op_ = nullptr;
+        scalar_rtdef.p_row2exprs_projector_ = nullptr;
+        common::ObArenaAllocator &arena_alloc = mem_context_->get_arena_allocator();
+
+        if (OB_FAIL(init_das_iter_scan_param(
+            ls_id_,
+            scalar_tablet_id,
+            side_ctdef,
+            &scalar_rtdef,
+            nullptr, // scalar scan 不支持事务
+            &weak_snapshot,
+            arena_alloc,
+            *scan_param
+        ))) {
+            LOG_WARN("failed to init scalar scan param", K(ret));
+        } else {
+          scan_param->table_param_ = &side_ctdef->table_param_;
+          scan_param->schema_version_ = scalar_schema->get_schema_version();
+          scan_param->scan_flag_.is_bare_row_scan_ = 1;
+        }
+    }
+  }
+
+  // 5. 覆盖 Ranges
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(scan_param->key_ranges_.assign(ranges))) {
+       LOG_WARN("failed to assign ranges", K(ret));
+    } else {
+       scan_param->is_get_ = false;
+       scan_param->reserved_cell_count_ = side_ctdef->access_column_ids_.count();
+       scan_param->sample_info_.reset();
+    }
+  }
+
+  // 6. 执行扫描
+  common::ObNewRowIterator *result_iter = nullptr;
+  storage::ObAccessService *access_service = MTL(storage::ObAccessService *);
+
+  if (OB_SUCC(ret)) {
+    if (OB_ISNULL(access_service)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(access_service->table_scan(*scan_param, result_iter))) {
+      LOG_WARN("side-scan failed, fallback", K(ret));
+      ret = OB_SUCCESS; 
+      // 资源清理
+      if (candidate_set) { candidate_set->destroy(); candidate_set = nullptr; }
+      if (scan_param) { scan_param->~ObTableScanParam(); scan_param = nullptr; }
+      return ret;
+    }
+  }
+
+  int64_t scan_count = 0;
+  const int64_t MAX_SCAN_LIMIT = 4096;
+  if (OB_SUCC(ret) && OB_NOT_NULL(result_iter)) {
+    common::ObNewRow *row = nullptr;
+    while (OB_SUCC(ret)) {
+      ret = result_iter->get_next_row(row);
+      if (OB_ITER_END == ret) {
+        ret = OB_SUCCESS;
+        break;
+      } else if (OB_FAIL(ret)) {
+        LOG_WARN("failed to get next row", K(ret));
+      } else if (OB_ISNULL(row)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        // 假设索引 Schema 结构：(scalar_col, doc_id_pk)
+        // 我们需要取最后一列 (DocID/PK)
+        if (row->count_ > 0) {
+          const common::ObObj &pk_val = row->cells_[row->count_ - 1];
+          if (pk_val.is_int()) { 
+            if (OB_FAIL(candidate_set->add(pk_val.get_int()))) {
+              LOG_WARN("failed to add to candidate set", K(ret));
+            } else {
+              scan_count++;
+            }
+          } else {
+             // 如果 PK 类型不对，可能 schema 假设有误
+             LOG_DEBUG("unexpected pk type", K(pk_val));
+          }
+        }
+        if (OB_SUCC(ret) && scan_count > MAX_SCAN_LIMIT) {
+          // 超过阈值，放弃优化，回退到全量计算
+          if (candidate_set) { candidate_set->destroy(); candidate_set = nullptr; }
+          scan_count = 0;
+          break;
+        }
+      }
+    }
+    result_iter->~ObNewRowIterator();
+  }
+
+  // 8. 挂载结果到 RtDef
+  if (OB_SUCC(ret) && scan_count > 0 && candidate_set != nullptr) {
+    ir_rtdef_->scalar_candidates_ = candidate_set;
+    LOG_INFO("[BMW Scalar] Side-Scan completed", K(scan_count), K(scalar_tablet_id));
+  } else {
+    if (candidate_set) { candidate_set->destroy(); }
+  }
+  if (scan_param) { scan_param->~ObTableScanParam(); }
+
+  return ret;
+}
+
 int ObDASTRMergeIter::init_das_iter_scan_param(const ObLSID &ls_id,
                                                const ObTabletID &tablet_id,
                                                const ObDASScanCtDef *ctdef,
@@ -355,7 +701,11 @@ int ObDASTRMergeIter::init_das_iter_scan_param(const ObLSID &ls_id,
     if (!ctdef->pd_expr_spec_.pushdown_filters_.empty()) {
       scan_param.op_filters_ = &ctdef->pd_expr_spec_.pushdown_filters_;
     }
-    scan_param.pd_storage_filters_ = rtdef->p_pd_expr_op_->pd_storage_filters_;
+    if (OB_NOT_NULL(rtdef->p_pd_expr_op_)) {
+      scan_param.pd_storage_filters_ = rtdef->p_pd_expr_op_->pd_storage_filters_;
+    } else {
+      scan_param.pd_storage_filters_ = nullptr;
+    }
     if (OB_NOT_NULL(tx_desc)) {
       scan_param.tx_id_ = tx_desc->get_tx_id();
     } else {
@@ -1011,6 +1361,7 @@ int ObDASTRMergeIter::inner_reuse()
     mem_context_->reset_remain_one_page();
   }
   check_rangekey_inited_ = false;
+  is_scalar_opt_done_ = false;
   return ret;
 }
 

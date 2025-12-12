@@ -19414,10 +19414,19 @@ int ObJoinOrder::process_index_for_match_expr(const uint64_t table_id,
               LOG_WARN("failed to append doc id filter", K(ret));
             }
           } else {
-            if (OB_FAIL(access_path.domain_idx_info_.index_scan_filters_.push_back(filter))) {
+            if (OB_FAIL(access_path.domain_idx_info_.scalar_filters_.push_back(filter))) {
               LOG_WARN("failed to append scalar filter", K(ret));
             }
           }
+        }
+      }
+      if (OB_SUCC(ret) && !access_path.domain_idx_info_.scalar_filters_.empty()) {
+        uint64_t best_scalar_idx = OB_INVALID_ID;
+        if (OB_FAIL(find_best_scalar_index(ref_table_id, access_path.domain_idx_info_.scalar_filters_, best_scalar_idx))) {
+          LOG_WARN("failed to find best scalar index", K(ret));
+        } else if (best_scalar_idx != OB_INVALID_ID) {
+          access_path.domain_idx_info_.scalar_index_tid_ = best_scalar_idx;
+          LOG_TRACE("OPT: Selected scalar index for FTS", K(best_scalar_idx));
         }
       }
     }
@@ -19521,6 +19530,7 @@ int ObJoinOrder::init_basic_text_retrieval_info(uint64_t table_id,
           } else {
             // [NEW] Extract doc id filters for cost estimation
             ObSEArray<ObRawExpr*, 4> doc_id_filters;
+            ObSEArray<ObRawExpr*, 4> scalar_filters;
             for (int64_t k = 0; OB_SUCC(ret) && k < helper.filters_.count(); ++k) {
               ObRawExpr *filter = helper.filters_.at(k);
               if (OB_ISNULL(filter)) {
@@ -19534,6 +19544,11 @@ int ObJoinOrder::init_basic_text_retrieval_info(uint64_t table_id,
                   if (OB_FAIL(doc_id_filters.push_back(filter))) {
                     LOG_WARN("failed to push back doc id filter", K(ret));
                   }
+                } else {
+                  // [Added] Collect other scalar filters (e.g. base_id IN ...)
+                  if (OB_FAIL(scalar_filters.push_back(filter))) {
+                    LOG_WARN("failed to push back scalar filter", K(ret));
+                  }
                 }
               }
             }
@@ -19546,7 +19561,8 @@ int ObJoinOrder::init_basic_text_retrieval_info(uint64_t table_id,
                                                   tmp_match_expr_info.query_range_,
                                                   tmp_match_expr_info.query_range_row_count_,
                                                   tmp_match_expr_info.selectivity_,
-                                                  doc_id_filters))) { // [NEW] Pass doc_id_filters
+                                                  doc_id_filters,
+                                                  scalar_filters))) { // [NEW] Pass doc_id_filters
                 LOG_WARN("failed to estimate fts index scan", K(ret));
               } else if (OB_FALSE_IT(tmp_match_expr_info.match_expr_ = match_expr)) {
               } else if (OB_FALSE_IT(tmp_match_expr_info.inv_idx_id_ = inv_idx_tids.at(j))) {
@@ -19588,6 +19604,7 @@ int ObJoinOrder::init_basic_text_retrieval_info(uint64_t table_id,
       } else {
          // [NEW] Extract doc id filters for cost estimation
          ObSEArray<ObRawExpr*, 4> doc_id_filters;
+         ObSEArray<ObRawExpr*, 4> scalar_filters;
          for (int64_t k = 0; OB_SUCC(ret) && k < helper.filters_.count(); ++k) {
            ObRawExpr *filter = helper.filters_.at(k);
            if (OB_ISNULL(filter)) {
@@ -19601,6 +19618,11 @@ int ObJoinOrder::init_basic_text_retrieval_info(uint64_t table_id,
                if (OB_FAIL(doc_id_filters.push_back(filter))) {
                  LOG_WARN("failed to push back doc id filter", K(ret));
                }
+             } else {
+                // [Added] Collect other scalar filters (e.g. base_id IN ...)
+                if (OB_FAIL(scalar_filters.push_back(filter))) {
+                  LOG_WARN("failed to push back scalar filter", K(ret));
+                }
              }
            }
          }
@@ -19614,7 +19636,8 @@ int ObJoinOrder::init_basic_text_retrieval_info(uint64_t table_id,
                                                match_expr_info.query_range_,
                                                match_expr_info.query_range_row_count_,
                                                match_expr_info.selectivity_,
-                                               doc_id_filters))) { // [NEW] Pass doc_id_filters
+                                               doc_id_filters,
+                                               scalar_filters))) { // [NEW] Pass doc_id_filters
              LOG_WARN("failed to estimate fts index scan", K(ret));
            } else if (OB_FALSE_IT(match_expr_info.match_expr_ = match_expr)) {
            } else if (OB_FALSE_IT(match_expr_info.inv_idx_id_ = index_id)) {
@@ -19966,7 +19989,8 @@ int ObJoinOrder::estimate_fts_index_scan(uint64_t table_id,
                                          ObQueryRangeProvider *query_range,
                                          int64_t &query_range_row_count,
                                          double &selectivity,
-                                         const ObIArray<ObRawExpr*> &doc_id_filters)
+                                         const ObIArray<ObRawExpr*> &doc_id_filters,
+                                         const ObIArray<ObRawExpr*> &scalar_filters)
 {
   int ret = OB_SUCCESS;
   ObTableMetaInfo table_meta_range(index_id);
@@ -20044,13 +20068,27 @@ int ObJoinOrder::estimate_fts_index_scan(uint64_t table_id,
             ret = OB_SUCCESS;
           }
         }
-        if (doc_id_sel < 1.0 && doc_id_sel > 0.0) {
-          double reduced_rows = static_cast<double>(query_range_row_count) * doc_id_sel;
-          query_range_row_count = static_cast<int64_t>(std::max(1.0, reduced_rows));
+        double scalar_sel = 1.0;
+        if (!scalar_filters.empty()) {
+          if (OB_FAIL(ObOptSelectivity::calculate_selectivity(
+                      get_plan()->get_basic_table_metas(),
+                      get_plan()->get_selectivity_ctx(),
+                      scalar_filters,
+                      scalar_sel,
+                      get_plan()->get_predicate_selectivities()))) {
+            LOG_WARN("failed to calculate scalar filter selectivity", K(ret));
+            ret = OB_SUCCESS;
+          }
         }
-        selectivity = get_table_meta().table_row_count_ == 0 ? 0 :
-                      table_meta_range.table_row_count_ * 1.0 / get_table_meta().table_row_count_;
-        selectivity = selectivity * doc_id_sel;
+        double combined_sel = doc_id_sel * scalar_sel;
+        double reduced_rows = static_cast<double>(query_range_row_count) * combined_sel;
+        if (get_plan()->get_stmt()->has_top_limit() && scalar_sel < 0.5) {
+          double bmw_heuristic_rows = 100.0; 
+          reduced_rows = std::min(reduced_rows, bmw_heuristic_rows);
+        }
+        query_range_row_count = static_cast<int64_t>(std::max(1.0, reduced_rows));
+        double total_rows = get_table_meta().table_row_count_;
+        selectivity = static_cast<double>(query_range_row_count) / total_rows;
         // refine selectivity
         selectivity = std::min(selectivity, 1.0);
       }
@@ -20367,6 +20405,78 @@ int ObJoinOrder::check_is_doc_id_filter(const ObRawExpr *filter,
     is_doc_id_filter = true;
   }
 
+  return ret;
+}
+
+int ObJoinOrder::find_best_scalar_index(
+    const uint64_t table_id,
+    const ObIArray<ObRawExpr*> &scalar_filters,
+    uint64_t &best_index_tid)
+{
+  int ret = OB_SUCCESS;
+  best_index_tid = OB_INVALID_ID;
+  if (scalar_filters.empty()) {
+    return ret;
+  }
+  ObSqlSchemaGuard *schema_guard = OPT_CTX.get_sql_schema_guard();
+  const ObTableSchema *table_schema = nullptr;
+  if (OB_FAIL(schema_guard->get_table_schema(table_id, table_schema))) {
+    LOG_WARN("failed to get table schema", K(ret), K(table_id));
+    return ret;
+  }
+  ObSEArray<uint64_t, 4> target_col_ids;
+  for (int64_t i = 0; OB_SUCC(ret) && i < scalar_filters.count(); ++i) {
+    ObRawExpr *expr = scalar_filters.at(i);
+    if (expr->get_expr_type() == T_OP_EQ || expr->get_expr_type() == T_OP_IN) {
+      ObArray<ObRawExpr *> cols;
+      if (OB_SUCC(ObRawExprUtils::extract_column_exprs(expr, cols))) {
+        for (int k = 0; k < cols.count(); k++) {
+          if (cols.at(k)->is_column_ref_expr()) {
+            if (OB_FAIL(target_col_ids.push_back(
+                    static_cast<ObColumnRefRawExpr*>(cols.at(k))->get_column_id()))) {
+              LOG_WARN("failed to push back column id", K(ret));
+            }
+          }
+        }
+      }
+    }
+  }
+  if (target_col_ids.empty()) {
+    return ret;
+  }
+  ObSEArray<ObAuxTableMetaInfo, 4> index_infos;
+  if (OB_FAIL(table_schema->get_simple_index_infos(index_infos))) {
+    LOG_WARN("failed to get simple index infos", K(ret));
+    return ret;
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < index_infos.count(); ++i) {
+    const ObAuxTableMetaInfo &info = index_infos.at(i);
+    const ObTableSchema *idx_schema = nullptr; 
+    if (OB_FAIL(schema_guard->get_table_schema(info.table_id_, idx_schema))) {
+      LOG_WARN("failed to get index schema", K(ret), K(info.table_id_));
+      continue;
+    }
+    if (!idx_schema->is_normal_index()) {
+      continue;
+    }
+    if (!idx_schema->can_read_index() || !idx_schema->is_index_visible()) {
+      continue;
+    }
+    const common::ObRowkeyInfo &rowkey_info = idx_schema->get_rowkey_info();
+    if (rowkey_info.get_size() > 0) {
+      uint64_t first_col_id = OB_INVALID_ID;
+      if (OB_FAIL(rowkey_info.get_column_id(0, first_col_id))) {
+        LOG_WARN("failed to get first column id", K(ret));
+        continue;
+      }
+      if (ObOptimizerUtil::find_item(target_col_ids, first_col_id)) {
+        best_index_tid = info.table_id_;
+        LOG_TRACE("OPT: Found scalar index for FTS optimization", 
+                  K(table_id), K(best_index_tid), K(first_col_id));
+        break; 
+      }
+    }
+  }
   return ret;
 }
 

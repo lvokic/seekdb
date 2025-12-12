@@ -156,6 +156,10 @@ private:
   int init_topk_limit();
   int init_block_max_iter_param();
   int init_doc_length_est_param();
+  int build_scalar_candidate_set();
+  int extract_ranges_from_in_expr(const ObExpr *expr, 
+                                  uint64_t table_id, 
+                                  common::ObIArray<common::ObNewRange> &ranges);
 private:
   static const int64_t FWD_IDX_ROWKEY_COL_CNT = 2;
   static const int64_t INV_IDX_ROWKEY_COL_CNT = 3;
@@ -201,6 +205,7 @@ private:
   bool check_rangekey_inited_;
   bool inv_idx_tablet_switched_;
   bool is_inited_;
+  bool is_scalar_opt_done_;
   DISALLOW_COPY_AND_ASSIGN(ObDASTRMergeIter);
 };
 

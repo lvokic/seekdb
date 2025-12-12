@@ -647,6 +647,22 @@ public:
     }
     return empty_array;
   }
+
+  inline const common::ObIArray<ObRawExpr *> &get_scalar_filters() const
+  {
+    static const common::ObSEArray<ObRawExpr *, 0> empty_array;
+    if (OB_NOT_NULL(access_path_)) {
+      return access_path_->domain_idx_info_.scalar_filters_;
+    }
+    return empty_array;
+  }
+
+  uint64_t get_scalar_index_tid() const {
+    if (OB_NOT_NULL(access_path_)) {
+      return access_path_->domain_idx_info_.scalar_index_tid_;
+    }
+    return common::OB_INVALID_ID;
+  }
   /**
    *  Get pushdown aggr expressions
    */

@@ -5,7 +5,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,6 +18,12 @@
 #define OB_DAS_IR_DEFINE_H_
 
 #include "ob_das_attach_define.h"
+
+namespace oceanbase {
+namespace storage {
+class ObScalarFilterCandidateSet;
+}
+}
 
 namespace oceanbase
 {
@@ -81,7 +87,9 @@ public:
       mode_flag_(NATURAL_LANGUAGE_MODE),
       flags_(0),
       field_boost_expr_(nullptr),
-      scalar_filters_(alloc) {}
+      scalar_filters_(alloc),
+      scalar_index_ctdef_(nullptr) {} // [FIX] Initialized
+      
   bool need_calc_relevance() const { return nullptr != relevance_expr_; }
   bool need_proj_relevance_score() const { return nullptr != relevance_proj_col_; }
   bool need_fwd_idx_agg() const { return has_fwd_agg_ && need_calc_relevance(); }
@@ -208,6 +216,7 @@ public:
   };
   ObExpr *field_boost_expr_;
   ExprFixedArray scalar_filters_;
+  ObDASScanCtDef *scalar_index_ctdef_;
 };
 
 struct ObDASIRScanRtDef : ObDASAttachRtDef
@@ -217,7 +226,8 @@ public:
   ObDASIRScanRtDef()
     : ObDASAttachRtDef(DAS_OP_IR_SCAN),
       fts_idx_(OB_INVALID_INDEX),
-      minimum_should_match_(0) {}
+      minimum_should_match_(0),
+      scalar_candidates_(nullptr) {}
 
   virtual ~ObDASIRScanRtDef() {}
 
@@ -278,6 +288,7 @@ public:
   // fts_idx_ is dynamically generated during execution based on the rtdef tree and does not need to be serialized.
   int64_t fts_idx_;
   int64_t minimum_should_match_;
+  storage::ObScalarFilterCandidateSet *scalar_candidates_;
 };
 
 struct ObDASIRAuxLookupCtDef : ObDASAttachCtDef

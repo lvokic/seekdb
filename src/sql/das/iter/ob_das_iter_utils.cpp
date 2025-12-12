@@ -1624,6 +1624,41 @@ int ObDASIterUtils::create_match_part_score_sub_tree(ObTableScanParam &scan_para
   return ret;
 }
 
+static int extract_ranges_from_in_expr(
+    const ObExpr *expr,
+    ObEvalCtx &eval_ctx,
+    uint64_t table_id, 
+    common::ObIArray<common::ObNewRange> &ranges)
+{
+  int ret = OB_SUCCESS;
+  if (expr->type_ != T_OP_IN) {
+    return OB_INVALID_ARGUMENT;
+  }
+  for (int64_t i = 1; OB_SUCC(ret) && i < expr->arg_cnt_; ++i) {
+    ObExpr *val_expr = expr->args_[i];
+    ObDatum *datum = nullptr;
+    if (OB_FAIL(val_expr->eval(eval_ctx, datum))) {
+      LOG_WARN("failed to eval constant in list", K(ret));
+    } else {
+      common::ObNewRange range;
+      range.table_id_ = table_id;
+      ObObj obj_val;
+      if (OB_FAIL(datum->to_obj(obj_val, val_expr->obj_meta_))) {
+         LOG_WARN("failed to convert datum to obj", K(ret));
+      } else {
+        range.start_key_.assign(&obj_val, 1);
+        range.end_key_.assign(&obj_val, 1);
+        range.border_flag_.set_inclusive_start();
+        range.border_flag_.set_inclusive_end();
+        if (OB_FAIL(ranges.push_back(range))) {
+          LOG_WARN("failed to push range", K(ret));
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 static int extract_id_range_from_filters(
     const ExprFixedArray *scalar_filters,
     ObEvalCtx *eval_ctx,
