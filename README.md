@@ -136,7 +136,7 @@ conda activate fulltext
 # 编译/部署集群
 
 ## 编译
-bash build.sh release -DOB_USE_CCACHE=ON --init --make -j6
+bash build.sh release -DOB_USE_CCACHE=ON --init --make -j3
 ## 部署
 ### 在 seekdb 目录下运行
 ./tools/deploy/obd.sh prepare -p /tmp/obtest

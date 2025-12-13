@@ -25,9 +25,7 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    python3.10 main.py --dataset="./data/dataset/" \\
-                       --questions="./data/questions.json" \\
-                       --output="./data/output.json"
+    python3 main.py --dataset=./data/dataset/ --questions=./data/questions.json --output=./data/output.json
         """,
     )
 
