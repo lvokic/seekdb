@@ -566,8 +566,6 @@ int ObSRBMWIterImpl::next_pivot_range(int64_t &skip_range_cnt)
       // 下一个候选区间的起点已经超过了用户限制的 id < 1000
       // 没必要再跳了，直接正常结束迭代
       ret = OB_ITER_END;
-      LOG_DEBUG("[Scalar Filter] BMW Early Termination in next_pivot_range", 
-                KPC(min_unevaluated_id), K_(id_upper_bound));
     } else if (OB_FAIL(advance_dim_iters_for_next_round(*min_unevaluated_id, false))) {
       LOG_WARN("failed to advance dim iters for next round", K(ret));
     }

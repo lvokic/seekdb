@@ -7808,6 +7808,13 @@ int AccessPath::estimate_cost()
       est_cost_info_.phy_query_range_row_count_ = opt_phy_query_range_row_count;
       est_cost_info_.logical_query_range_row_count_ = opt_logical_query_range_row_count;
     }
+    if (est_cost_info_.index_meta_info_.is_fulltext_index_) {
+      double original_cost = cost_;
+      cost_ = cost_ / 10.0; 
+      LOG_TRACE("OPT: [HACK] Force reduce fulltext index cost", 
+                K(index_id_), K(original_cost), K(cost_));
+      OPT_TRACE_COST_MODEL("HACK: fulltext cost force reduced from ", original_cost, " to ", cost_);
+    }
     DISABLE_OPT_TRACE_COST_MODEL;
   }
   return ret;
@@ -20083,7 +20090,7 @@ int ObJoinOrder::estimate_fts_index_scan(uint64_t table_id,
         double combined_sel = doc_id_sel * scalar_sel;
         double reduced_rows = static_cast<double>(query_range_row_count) * combined_sel;
         if (get_plan()->get_stmt()->has_top_limit() && scalar_sel < 0.5) {
-          double bmw_heuristic_rows = 100.0; 
+          double bmw_heuristic_rows = 1.0; 
           reduced_rows = std::min(reduced_rows, bmw_heuristic_rows);
         }
         query_range_row_count = static_cast<int64_t>(std::max(1.0, reduced_rows));

@@ -73,7 +73,7 @@ cd Flamegraph
 echo "Flamegraph has been generated: flamegraph.svg"
 
 kill -9 $(pidof observer)
-bash build.sh debug -DOB_USE_CCACHE=ON --init --make -j8
+bash build.sh debug -DOB_USE_CCACHE=ON --init --make -j3
 cp build_debug/src/observer/observer ~/seekdb/bin
 
 ./bin/observer
@@ -137,7 +137,7 @@ LIMIT 5;
 b oceanbase::sql::ObDASInsertOp::insert_rows
 cond 1 this->insert_ctdef_->table_param_.data_table_.table_id_ == 500007
 
-grep -a -C 5 "YB427F000001-000645B9BFBF814A-0-0" observer.log
+grep -a -C 5 "YB427F000001-000645BDAF8A2057-0-0" observer.log
 grep -a "ob_table_scan_op.cpp" observer.log | grep "init_ddl_column_checksum" | grep "ret=-4002" | tail -n 5
 
 
