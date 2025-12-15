@@ -20,6 +20,7 @@
 #include "ob_i_sparse_retrieval_iter.h"
 #include "sql/das/ob_das_ir_define.h"
 #include "sql/das/iter/ob_das_text_retrieval_eval_node.h"
+#include <immintrin.h>
 
 namespace oceanbase
 {
@@ -34,6 +35,9 @@ struct ObSRDaaTRelevanceCollector
   virtual void reset() = 0;
   virtual void reuse() = 0;
   virtual int collect_one_dim(const int64_t dim_idx, const double relevance) = 0;
+  virtual int collect_batch_dims(const int64_t *dim_idxs,
+                                 const double *relevances,
+                                 int64_t count) = 0;
   virtual int get_result(double &relevance, bool &is_valid) = 0;
 };
 
@@ -49,6 +53,9 @@ struct ObSRDaaTInnerProductRelevanceCollector : ObSRDaaTRelevanceCollector
   virtual void reset() override;
   virtual void reuse() override;
   virtual int collect_one_dim(const int64_t dim_idx, const double) override;
+  virtual int collect_batch_dims(const int64_t *dim_idxs,
+                                 const double *relevances,
+                                 int64_t count) override;
   virtual int get_result(double &relevance, bool &is_valid) override;
 private:
   double total_relevance_;
@@ -66,6 +73,9 @@ struct ObSRDaaTBooleanRelevanceCollector : ObSRDaaTRelevanceCollector
   virtual void reset() override;
   virtual void reuse() override;
   virtual int collect_one_dim(const int64_t dim_idx, const double) override;
+  virtual int collect_batch_dims(const int64_t *dim_idxs,
+                                 const double *relevances,
+                                 int64_t count) override;
   virtual int get_result(double &relevance, bool &is_valid) override;
 private:
   ObIAllocator *allocator_;

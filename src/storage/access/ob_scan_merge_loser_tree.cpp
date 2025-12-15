@@ -59,17 +59,24 @@ int ObScanMergeLoserTreeCmp::compare_rowkey(const ObDatumRow &l_row, const ObDat
     ret = OB_ERR_UNEXPECTED;
     STORAGE_LOG(WARN, "Unexpected row column cnt", K(ret), K(l_row), K(r_row), K_(rowkey_size));
   } else {
-    ObDatumRowkey l_key;
-    ObDatumRowkey r_key;
-    int temp_cmp_ret = 0;
-    if (OB_FAIL(l_key.assign(l_row.storage_datums_, rowkey_size_))) {
-      STORAGE_LOG(WARN, "Failed to assign store rowkey", K(ret), K(l_row), K_(rowkey_size));
-    } else if (OB_FAIL(r_key.assign(r_row.storage_datums_, rowkey_size_))) {
-      STORAGE_LOG(WARN, "Failed to assign store rowkey", K(ret), K(r_row), K_(rowkey_size));
-    } else if (OB_FAIL(l_key.compare(r_key, *datum_utils_, temp_cmp_ret))) {
-      STORAGE_LOG(WARN, "Failed to compare rowkey", K(ret), K(l_key), K(r_key), KPC(datum_utils_));
+    int cmp_ret_int = 0;
+    if (1 == rowkey_size_) {
+      const ObStorageDatum &l_datum = l_row.storage_datums_[0];
+      const ObStorageDatum &r_datum = r_row.storage_datums_[0];
+      if (OB_FAIL(datum_utils_->get_cmp_funcs().at(0).get_cmp_func().cmp_func_(l_datum, r_datum, cmp_ret_int))) {
+        STORAGE_LOG(WARN, "Failed to compare rowkey", K(ret), K(l_datum), K(r_datum));
+      }
     } else {
-      cmp_result = temp_cmp_ret;
+      for (int64_t i = 0; OB_SUCC(ret) && 0 == cmp_ret_int && i < rowkey_size_; ++i) {
+        const ObStorageDatum &l_datum = l_row.storage_datums_[i];
+        const ObStorageDatum &r_datum = r_row.storage_datums_[i];
+        if (OB_FAIL(datum_utils_->get_cmp_funcs().at(i).get_cmp_func().cmp_func_(l_datum, r_datum, cmp_ret_int))) {
+           STORAGE_LOG(WARN, "Failed to compare datum", K(ret), K(i));
+        }
+      }
+    }
+    if (OB_SUCC(ret)) {
+      cmp_result = cmp_ret_int;
     }
   }
   return ret;

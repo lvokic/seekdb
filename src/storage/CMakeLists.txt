@@ -1057,7 +1057,6 @@ ob_set_subtarget(ob_storage retrieval
   retrieval/ob_sparse_bmw_iter.cpp
   retrieval/ob_sparse_daat_iter.cpp
   retrieval/ob_sparse_taat_iter.cpp
-  retrieval/ob_sparse_utils.cpp
   retrieval/ob_sparse_lookup_iter.cpp
   retrieval/ob_text_retrieval_token_iter.cpp
   retrieval/ob_text_daat_iter.cpp
@@ -1083,6 +1082,7 @@ ob_set_subtarget(ob_storage_simd common
   blocksstable/encoding/ob_raw_decoder_simd.cpp
   blocksstable/encoding/ob_dict_decoder_simd.cpp
   blocksstable/cs_encoding/ob_dict_column_decoder_simd.cpp
+  retrieval/ob_sparse_utils.cpp
 )
 
 ob_server_add_target(ob_storage_simd)
@@ -1090,6 +1090,6 @@ ob_server_add_target(ob_storage_simd)
 if (${ARCHITECTURE} STREQUAL "x86_64")
   target_compile_options(ob_storage_simd
     PRIVATE
-      -mtune=core-avx2 -mavx2 -mfma -mbmi2 -mavx512vl -mavx512bw
+      -mtune=core-avx2 -mavx2 -mfma -mbmi2 -mavx512vl -mavx512bw -mavx512f
   )
 endif()

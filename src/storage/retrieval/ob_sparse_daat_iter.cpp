@@ -83,6 +83,7 @@ ObSRDaaTIterImpl::ObSRDaaTIterImpl()
     buffered_relevances_(),
     next_round_iter_idxes_(),
     next_round_cnt_(0),
+    current_doc_relevances_(),
     set_datum_func_(nullptr)
 {
 }
@@ -144,6 +145,12 @@ int ObSRDaaTIterImpl::init(
       LOG_WARN("failed to init iter loser tree", K(ret));
     } else if (OB_FAIL(merge_heap_->open(dim_iters_->count()))) {
       LOG_WARN("failed to open iter loser tree", K(ret));
+    } else if (FALSE_IT(current_doc_relevances_.set_allocator(iter_allocator_))) {
+      LOG_WARN("failed to set allocator", K(ret));
+    } else if (OB_FAIL(current_doc_relevances_.init(dim_iters.count()))) {
+      LOG_WARN("failed to init current doc relevances", K(ret));
+    } else if (OB_FAIL(current_doc_relevances_.prepare_allocate(dim_iters.count()))) {
+      LOG_WARN("failed to prepare allocate current doc relevances", K(ret));
     } else {
       for (int64_t i = 0; i < dim_iters.count(); ++i) {
         next_round_iter_idxes_[i] = i;
@@ -307,7 +314,17 @@ int ObSRDaaTIterImpl::fill_merge_heap()
 {
   int ret = OB_SUCCESS;
   ObSRMergeItem item;
+  const int64_t PREFETCH_DIST = 4;
   for (int64_t i = 0; OB_SUCC(ret) && i < next_round_cnt_; ++i) {
+    if (i + PREFETCH_DIST < next_round_cnt_) {
+      const int64_t prefetch_iter_idx = next_round_iter_idxes_[i + PREFETCH_DIST];
+      if (dim_iters_ != nullptr && prefetch_iter_idx < dim_iters_->count()) {
+        ObISRDaaTDimIter *prefetch_iter = dim_iters_->at(prefetch_iter_idx);
+        if (!OB_ISNULL(prefetch_iter)) {
+          __builtin_prefetch(prefetch_iter, 0, 3);
+        }
+      }
+    }
     const int64_t iter_idx = next_round_iter_idxes_[i];
     ObISRDaaTDimIter *dim_iter = nullptr;
     if (OB_ISNULL(dim_iter = dim_iters_->at(iter_idx))) {
@@ -348,36 +365,55 @@ int ObSRDaaTIterImpl::collect_dims_by_id(const ObDatum *&id_datum, double &relev
   const ObSRMergeItem *top_item = nullptr;
   bool curr_doc_end = false;
   int64_t iter_idx = 0;
+  int64_t current_doc_dim_count = 0;
   relevance = 0.0;
   got_valid_id = false;
-
+  
+  next_round_cnt_ = 0;
   while (OB_SUCC(ret) && !merge_heap_->empty() && !curr_doc_end) {
     if (merge_heap_->is_unique_champion()) {
       curr_doc_end = true;
     }
     if (OB_FAIL(merge_heap_->top(top_item))) {
       LOG_WARN("failed to get top item from merge heap", K(ret));
-    } else if (OB_FAIL(relevance_collector_->collect_one_dim(top_item->iter_idx_, top_item->relevance_))) {
-      LOG_WARN("failed to collect one dimension", K(ret));
-    } else if (FALSE_IT(iter_idx = top_item->iter_idx_)) {
-    } else if (OB_FAIL(merge_heap_->pop())) {
-      LOG_WARN("failed to pop top item in heap", K(ret));
     } else {
-      next_round_iter_idxes_[next_round_cnt_++] = iter_idx;
+      // 批量缓存维度信息和分数
+      iter_idx = top_item->iter_idx_;
+      current_doc_relevances_[current_doc_dim_count] = top_item->relevance_;
+      // next_round_iter_idxes_ 被用作维度索引（dim_idxs）的临时缓存
+      next_round_iter_idxes_[current_doc_dim_count] = iter_idx;
+      current_doc_dim_count++;
+    }
+    // 执行堆操作（取代了原有的 collect_one_dim 和下一轮索引维护）
+    if (OB_FAIL(merge_heap_->pop())) {
+      LOG_WARN("failed to pop top item in heap", K(ret));
     }
   }
-
   if (OB_SUCC(ret)) {
-    id_datum = iter_domain_ids_[iter_idx];
-    LOG_DEBUG("collect one dim", KPC(id_datum));
+    // 检查是否有匹配的维度，iter_idx 此时是最后 pop 出来的迭代器索引
+    if (OB_UNLIKELY(0 == current_doc_dim_count)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected zero dim count", K(ret));
+    } else {
+      id_datum = iter_domain_ids_[iter_idx];
+      LOG_DEBUG("collect one dim", KPC(id_datum));
+    }
+  }
+  if (OB_SUCC(ret)) {
     if (OB_ISNULL(id_datum)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("unexpected null id datum", K(ret));
+    } else if (OB_FAIL(relevance_collector_->collect_batch_dims(next_round_iter_idxes_.get_data(),
+                                                                current_doc_relevances_.get_data(),
+                                                                current_doc_dim_count))) {
+      LOG_WARN("failed to collect batch dimensions", K(ret));
     } else if (OB_FAIL(relevance_collector_->get_result(relevance, got_valid_id))) {
       LOG_WARN("failed to get result", K(ret));
     } else if (got_valid_id && OB_FAIL(process_collected_row(*id_datum, relevance))) {
       LOG_WARN("failed to process collected row", K(ret));
     }
+    // 维护下一轮的迭代器索引
+    next_round_cnt_ = current_doc_dim_count;
   }
 
   return ret;
@@ -459,38 +495,80 @@ int ObSRDaaTIterImpl::project_results(const int64_t count)
   ObExpr *relevance_proj_expr = iter_param_->relevance_proj_expr_;
   ObExpr *id_proj_expr = iter_param_->id_proj_expr_;
   ObEvalCtx *eval_ctx = iter_param_->eval_ctx_;
-  ObEvalCtx::BatchInfoScopeGuard guard(*eval_ctx);
+  // ObEvalCtx::BatchInfoScopeGuard guard(*eval_ctx); 
 
   if (eval_ctx->is_vectorized()) {
     sql::ObBitVector &id_evaluated_flags = id_proj_expr->get_evaluated_flags(*eval_ctx);
-    for (int64_t i = 0; i < count; ++i) {
-      guard.set_batch_idx(i);
-      ObDatum &id_proj_datum = id_proj_expr->locate_datum_for_write(*eval_ctx);
-      set_datum_func_(id_proj_datum, buffered_domain_ids_[i]);
-      id_evaluated_flags.set(i);
-      id_proj_expr->set_evaluated_projected(*eval_ctx);
+    ObDatum *id_datums = id_proj_expr->locate_batch_datums(*eval_ctx);
+    // 检查是否为常见的 UInt64/Int64 类型 (DocID 通常是 int64)
+    if (iter_param_->id_proj_expr_->datum_meta_.type_ == common::ObUInt64Type ||
+        iter_param_->id_proj_expr_->datum_meta_.type_ == common::ObIntType) {
+        // Fast Path: 直接内存赋值，无函数调用
+        int64_t i = 0;
+        // 循环展开
+        for (; i <= count - 4; i += 4) {
+            id_datums[i].set_int(buffered_domain_ids_[i].get_datum().get_int());
+            id_datums[i+1].set_int(buffered_domain_ids_[i+1].get_datum().get_int());
+            id_datums[i+2].set_int(buffered_domain_ids_[i+2].get_datum().get_int());
+            id_datums[i+3].set_int(buffered_domain_ids_[i+3].get_datum().get_int());
+
+            id_evaluated_flags.set(i);
+            id_evaluated_flags.set(i+1);
+            id_evaluated_flags.set(i+2);
+            id_evaluated_flags.set(i+3);
+        }
+        // 处理剩余
+        for (; i < count; ++i) {
+            id_datums[i].set_int(buffered_domain_ids_[i].get_datum().get_int());
+            id_evaluated_flags.set(i);
+        }
+    } else {
+        // Slow Path: 其他类型使用函数指针 (保持原有逻辑，但批量化)
+        for (int64_t i = 0; i < count; ++i) {
+            set_datum_func_(id_datums[i], buffered_domain_ids_[i]);
+            id_evaluated_flags.set(i);
+        }
     }
     if (iter_param_->need_project_relevance()) {
       sql::ObBitVector &relevance_evaluated_flags = relevance_proj_expr->get_evaluated_flags(*eval_ctx);
-      for (int64_t i = 0; i < count; ++i) {
-        guard.set_batch_idx(i);
-        ObDatum &relevance_proj_datum = relevance_proj_expr->locate_datum_for_write(*eval_ctx);
-        relevance_proj_datum.set_double(buffered_relevances_[i]);
+      ObDatum *relevance_datums = relevance_proj_expr->locate_batch_datums(*eval_ctx);
+      
+      int64_t i = 0;
+      for (; i <= count - 4; i += 4) {
+        // 直接访问数组，无需 locate_datum_for_write
+        relevance_datums[i].set_double(buffered_relevances_[i]);
+        relevance_datums[i+1].set_double(buffered_relevances_[i+1]);
+        relevance_datums[i+2].set_double(buffered_relevances_[i+2]);
+        relevance_datums[i+3].set_double(buffered_relevances_[i+3]);
+
         relevance_evaluated_flags.set(i);
-        relevance_proj_expr->set_evaluated_projected(*eval_ctx);
+        relevance_evaluated_flags.set(i+1);
+        relevance_evaluated_flags.set(i+2);
+        relevance_evaluated_flags.set(i+3);
       }
+      for (; i < count; ++i) {
+        relevance_datums[i].set_double(buffered_relevances_[i]);
+        relevance_evaluated_flags.set(i);
+      }
+      // relevance_proj_expr->set_evaluated_projected(*eval_ctx);
     }
-  } else if (OB_UNLIKELY(1 != count)) {
+  } else if (OB_UNLIKELY(1 != count)) { // 使用 UNLIKELY 宏
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected number of results to project", K(ret), K(count));
   } else {
+    // Scalar Mode: 需要 Guard
+    ObEvalCtx::BatchInfoScopeGuard guard(*eval_ctx);
     guard.set_batch_idx(0);
+    
     ObDatum &id_proj_datum = id_proj_expr->locate_datum_for_write(*eval_ctx);
     set_datum_func_(id_proj_datum, buffered_domain_ids_[0]);
     id_proj_expr->set_evaluated_projected(*eval_ctx);
-    ObDatum &relevance_proj_datum = relevance_proj_expr->locate_datum_for_write(*eval_ctx);
-    relevance_proj_datum.set_double(buffered_relevances_[0]);
-    relevance_proj_expr->set_evaluated_projected(*eval_ctx);
+    
+    if (iter_param_->need_project_relevance()) { // 增加检查，防止不必要的 projection
+        ObDatum &relevance_proj_datum = relevance_proj_expr->locate_datum_for_write(*eval_ctx);
+        relevance_proj_datum.set_double(buffered_relevances_[0]);
+        relevance_proj_expr->set_evaluated_projected(*eval_ctx);
+    }
   }
   return ret;
 }

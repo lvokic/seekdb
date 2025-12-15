@@ -202,6 +202,8 @@ protected:
   int64_t id_lower_bound_;
   int64_t id_upper_bound_;
   bool enable_id_range_filter_;
+
+  static constexpr double PREDICTION_ALPHA = 0.2;
 };
 
 
