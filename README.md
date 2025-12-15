@@ -18,7 +18,7 @@
 
 本次赛题是在 OceanBase-seekdb 社区版（基于 2025-final-competition 分支，以下简称 seekdb）的基础上，在 MLDR 英文数据集（[mldr-v1.0-en](https://hf-mirror.com/datasets/Shitao/MLDR/tree/main/mldr-v1.0-en)）上，优化带标量的全文索引检索的性能。
 
-```plsql
+```sql
 SELECT docid_col, MATCH(fulltext_col) AGAINST(XXX) as _score
 FROM items1
 WHERE MATCH(fulltext_col) AGAINST(XXX)
@@ -119,7 +119,6 @@ python3 evaluate_results_oceanbase.py \
 选手使用的基础环境中提供了用于编译部署 seekdb 运行测试所需的必要依赖。基础环境中提供了`/root/source/seekdb`做为基础代码，可免于大家 clone 代码，下载依赖。也提供了 mldr_benchmark 脚本，位于`/root/source/mldr_benchmark`
 
 ```bash
-# 编译部署 seekdb 相关的环境依赖请参考初赛文档：https://open.oceanbase.com/train/TopicDetails?questionId=600034&subQesitonId=800284&subQuestionName=basic
 # 运行 mldr_benchmark 需要先安装 python3.11 相关依赖，如果遇到依赖版本不兼容等问题，可以使用 conda 安装 python 3.11 环境。
 # 推荐 python3.11 以上，python 版本不低于3.9
 mkdir -p ~/miniconda3
@@ -136,7 +135,7 @@ conda activate fulltext
 # 编译/部署集群
 
 ## 编译
-bash build.sh release -DOB_USE_CCACHE=ON --init --make -j3
+bash build.sh release -DOB_USE_CCACHE=ON --init --make -j8
 ## 部署
 ### 在 seekdb 目录下运行
 ./tools/deploy/obd.sh prepare -p /tmp/obtest
@@ -210,16 +209,16 @@ export JVM_PATH=$JAVA_HOME/lib/server/libjvm.so
 ```bash
 # 运行基础 mldr_benchmark 测试
 ## 测试时导入数据并构建索引
-python test_insert_fast.py --lang en
+python3.9 test_insert_fast.py --lang en
 ## 进行一组测试，获得平均查询时间
-python get_search_rrf_oceanbase.py --languages en
+python3.9 get_search_rrf_oceanbase.py --languages en
   --query_types bm25 --query_result_dave_dir ./query-results
 ## 计算召回率
-python evaluate_results_oceanbase.py --languages en
+python3.9 evaluate_results_oceanbase.py --languages en
   --metrics recall@10 --query_result_dave_dir ./query-results
 
 ## 一体化运行（一次预热 + 三次查询）
-python mldr_data_test.py --lang en --query_types bm25
+python3.9 mldr_data_test.py --lang en --query_types bm25
 ```
 
 注意：
@@ -235,10 +234,35 @@ python mldr_data_test.py --lang en --query_types bm25
 #### 约束条件
 
 为了大家的精力更加集中在全文检索场景的代码优化中，同时为了提高测试效率，再次做一些约束与约定。
-
-- 集中于内核源码逻辑功能修改：比如不允许修改影响程序运行效率的编译选项或指令集，不允许调整`build.sh`以及`deps`目录下所有内容等等
-- 不允许改变 SQL 执行路径。比如不通过 SQL 执行引擎/存储引擎，直接返回数据。
-- 不允许使用额外的缓存机制。只允许现在现有缓存机制，如 kv cache 等。
+1. 集中于内核源码逻辑功能修改：
+- 允许引入 SIMD 指令（如 SSE、AVX2、AVX-512）向量化实现，但需保证在不支持该指令集的平台上能回退到通用实现
+- 允许使用标准库或项目已包含的工具函数；
+- 不允许修改构建脚本（如 build.sh）、依赖项（deps/ 目录）、CMake/Makefile 中的全局编译选项（如 -O3 → -Ofast、-march=native 等），但允许为包含 SIMD 指令的特定源文件单独指定指令集编译标志（如 -mavx2、-mavx512f）
+2. 必须保持完整的 SQL 执行路径
+- 禁止绕过 SQL 解析层（如直接调用索引 API）
+- 禁止跳过执行引擎逻辑（如在 Parser 阶段直接返回结果）
+- 优化逻辑应具有泛化性
+  - 严禁通过字符串匹配硬编码分支
+  - 允许为特定查询模式设计专用执行算子，此类实现应覆盖该模式下的所有合法查询，而非仅针对个别 SQL 文本
+3. 如需引入缓存机制，须遵循以下要求：
+- 允许使用的缓存形式
+  - 内存结构缓存（仅适用于内存占用较小、生命周期明确的轻量级元数据缓存场景）：使用 seekdb 内核已有的、能被 seekdb 感知的原生缓存组件，例如 ob_hashmap、ob_kvcache 等
+  - 持久化存储缓存：若需新增持久化缓存结构，必须通过 seekdb 提供的存储接口实现，实现方式包括但不限于：
+    - 使用 TmpFile 机制（参考：src/storage/tmp_file/ob_tmp_file_manager.h，示例见 mittest/mtlenv/storage/tmp_file/test_tmp_file.cpp）
+    - 创建专用的系统表或内部表，可以参考 Internal_Tables_Guide.md
+- 严格禁止的行为
+  - 不得引入任何形式的查询结果缓存（Query Result Cache） 
+  - 不得实现脱离数据库存储引擎的私有缓存，包括但不限于：
+    - 内存中的 LRU 执行计划缓存、解析树缓存
+    - 自行维护的全局哈希表（未接入 ob_kvcache 等框架）
+    - 基于文件/共享内存的自定义缓存（未走 seekdb 接口）
+4. 数据完整性要求
+- 测试时，表及其全文索引中必须包含全量数据，不得通过减少数据量来提升性能
+- 表数据不得采样、截断或过滤
+- 索引必须基于完整数据构建，不得使用子集索引
+5. 系统资源限制 
+- 数据库进程的物理内存占用不得超过 11 GB
+- 测试环境将通过 Linux cgroups v2 为 observer 进程施加 11G 内存限制，并禁止 swap（memory.max=11GB，memory.swap.max=0），超过 11G 内存自动触发 OOM（如何启用 Linux cgroups v2可参考 [cgroup-cn/cgroup-v2/Linux启用cgroup v2.md at main · fairyfar/cgroup-cn](https://github.com/fairyfar/cgroup-cn/blob/main/cgroup-v2/Linux启用cgroup%20v2.md)）
 
 ---
 
@@ -326,9 +350,6 @@ $ wget -O ./rag/data/dataset.zip https://obcommunityprod.oss-cn-shanghai.aliyunc
     "question": "千味央厨的成立时间是什么时候？"
   },
   {
-    "question": "千味央厨的财务报表预测中，预计2024年的营业收入是多少？"
-  },
-  {
     "question": "千味央厨的主要产品有哪些类别？"
   }
 ]
@@ -345,14 +366,8 @@ $ wget -O ./rag/data/dataset.zip https://obcommunityprod.oss-cn-shanghai.aliyunc
   {
     "question": "千味央厨的成立时间是什么时候？",
     "answer": "千味央厨成立于2012年。",
-    "filename": "千味央厨-公司研究报告-深耕餐饮供应链为人间千味-23011258页.pdf",
-    "page": 15
-  },
-  {
-    "question": "千味央厨的财务报表预测中，预计2024年的营业收入是多少？",
-    "answer": "千味央厨预计2024年的营业收入为2,459百万元。",
-    "filename": "千味央厨-首次覆盖报告受益餐饮工业化趋势大B端壁垒赋能小B端降维打击-22052929页.pdf",
-    "page": 27
+    "filename": "千味央厨-公司深度报告打造央厨之道服务千万餐饮-22121364页.pdf",
+    "page": 8
   },
   {
     "question": "千味央厨的主要产品有哪些类别？",
@@ -376,12 +391,6 @@ $ wget -O ./rag/data/dataset.zip https://obcommunityprod.oss-cn-shanghai.aliyunc
     "page": 1
   },
   {
-    "question": "千味央厨的财务报表预测中，预计2024年的营业收入是多少？",
-    "answer": "xxx",
-    "filename": "xxx.pdf",
-    "page": 2
-  },
-  {
     "question": "千味央厨的主要产品有哪些类别？",
     "answer": "xxx",
     "filename": "xxx.pdf",
@@ -394,9 +403,8 @@ $ wget -O ./rag/data/dataset.zip https://obcommunityprod.oss-cn-shanghai.aliyunc
 
 该评分函数主要从三个方面对每个问题的回答进行评估，每个提问并计算一个综合分数:
 
-- 页面匹配度（满分 25 分）
-- 文件名匹配度（满分 25 分）
-- 答案内容相似度（满分 50 分）
+- 页面匹配度（满分 30 分）
+- 答案内容相似度（满分 70 分）
 
 具体的分数计算方式与 [eval.py](./rag/eval.py) 代码相同
 
@@ -467,7 +475,7 @@ options:
   --answer ANSWER  Path to the answer JSON file (ground truth)
 
 Examples:
-  cd rag && python3 eval.py --output ./data/output.json --answer ./data/train.json
+  cd rag && python3 eval.py --dataset ./data/dataset/ --output ./data/output.json --answer ./data/train.json
 ```
 
 #### 评测逻辑
@@ -475,7 +483,7 @@ Examples:
 ##### 编译 seekdb 数据库
 
 ```bash
-$ bash build.sh --init release -DOB_USE_CCACHE=ON -DOB_BUILD_UNITTEST=OFF -DOB_INCLUDE_UNITTEST=OFF --make -j4
+$ bash build.sh --init release -DOB_USE_CCACHE=ON -DOB_BUILD_UNITTEST=OFF -DOB_INCLUDE_UNITTEST=OFF --make -j6
 ```
 
 ##### 启动 seekdb 数据库
@@ -533,9 +541,17 @@ RAG 执行时间 (含文档导入，输出结果等) 不超过 40 分钟
 
 比赛模型提供来自阿里云百炼平台，可选模型列表参考: https://modelstudio.console.aliyun.com/?tab=doc#/doc/?type=model&url=2840914
 
+##### 模型提供
+
+为保证模型使用的公平性, 不允许自定义 BaseURL, API KEY 等变量，我们强制要求使用测评中的环境变量。
+
 ##### 模型限速
 
 参考 [https://modelstudio.console.aliyun.com/?tab=doc#/doc/?type=model&url=2840182](https://modelstudio.console.aliyun.com/?tab=doc#/doc/?type=model&url=2840182)
+
+#### 数据库使用
+
+本题目要求使用并且只能使用自己团队的 seekdb 做为数据库。不得使用如 SQLite, faiss 等替代 seekdb 的功能。
 
 ---
 
@@ -569,7 +585,7 @@ RAG 执行时间 (含文档导入，输出结果等) 不超过 40 分钟
 
 也就是内核成绩积分与 AI 应用成绩的占分比例是 7 ：3。
 
-每个队伍都使用最新的有效成绩进行综合计算。
+每个队伍都使用 **最新的有效成绩** 进行综合计算。
 
 最终按照综合得分（对应下图综合成绩）排名。
 
@@ -652,6 +668,8 @@ seekdb (与 OceanBase 类似) 的编译部署可以参考初赛文档：[https:/
 - 蓄意上传携带病毒文件的；
 - 通过扫盘等行为获取测试数据/评测代码的；
 - 蓄意发起对比赛平台、评估系统的攻击，扰乱比赛秩序的。
+
+**（4）违反上文中提到过的约束条件。**
 
 ## 赛后查重
 
@@ -1100,7 +1118,7 @@ seekdb 继承了 OceanBase 单机存储引擎、执行引擎、事务引擎、�
 # Clone the repository
 git clone https://github.com/oceanbase/seekdb.git
 cd seekdb
-bash build.sh debug -DOB_USE_CCACHE=ON --init --make -j6
+bash build.sh debug --init --make
 mkdir ~/seekdb
 mkdir ~/seekdb/bin
 cp build_debug/src/observer/observer ~/seekdb/bin

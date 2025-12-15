@@ -51,6 +51,40 @@ int ObSRDaaTInnerProductRelevanceCollector::collect_one_dim(const int64_t dim_id
   return ret;
 }
 
+int ObSRDaaTInnerProductRelevanceCollector::collect_batch_dims(
+  const int64_t *dim_idxs,
+  const double *relevances,
+  int64_t count)
+{
+  int ret = OB_SUCCESS;
+  matched_cnt_ += count;
+  __m512d total_vec = _mm512_setzero_pd(); // 初始化 8 个 double 累加器
+  int64_t i = 0;
+  for (; i <= count - 8; i += 8) {
+    __m512d scores = _mm512_loadu_pd(&relevances[i]);
+    total_vec = _mm512_add_pd(total_vec, scores);
+  }
+  // 1. 将 512-bit 归约到 256-bit
+  __m256d vlow_256 = _mm512_castpd512_pd256(total_vec);
+  __m256d vhigh_256 = _mm512_extractf64x4_pd(total_vec, 1); // 提取高 256 位
+  __m256d vsum_256 = _mm256_add_pd(vlow_256, vhigh_256); // [d3..d0] + [d7..d4]
+  // 2. 将 256-bit 归约到 128-bit (使用 AVX2 逻辑)
+  __m256d vsum_1 = _mm256_hadd_pd(vsum_256, vsum_256);
+  __m128d vlow = _mm256_castpd256_pd128(vsum_1);
+  __m128d vhigh = _mm256_extractf128_pd(vsum_1, 1);
+  __m128d vsum_2 = _mm_add_pd(vlow, vhigh);
+  double simd_sum = _mm_cvtsd_f64(vsum_2); // 从寄存器中取出标量结果
+  // 3. 处理剩余的非 SIMD 部分
+  double scalar_sum = 0.0;
+  for (; i < count; ++i) {
+    scalar_sum += relevances[i];
+  }
+  // 4. 更新总分数
+  total_relevance_ += simd_sum + scalar_sum;
+
+  return ret;
+}
+
 int ObSRDaaTInnerProductRelevanceCollector::get_result(double &relevance, bool &is_valid)
 {
   int ret = OB_SUCCESS;
@@ -103,6 +137,69 @@ int ObSRDaaTBooleanRelevanceCollector::collect_one_dim(const int64_t dim_idx, co
   return ret;
 }
 
+int ObSRDaaTBooleanRelevanceCollector::collect_batch_dims(
+    const int64_t *dim_idxs,
+    const double *relevances,
+    int64_t count)
+{
+    int ret = OB_SUCCESS;
+    const int64_t dim_count = dim_cnt_; 
+    int64_t i = 0;
+    // 循环展开 (步长为 4)，且必须保证每一步操作后都检查 ret 
+    // 这将减少指令级并行性 (ILP)，但确保了严格的错误处理顺序，符合您的风格。
+    for (; OB_SUCC(ret) && i <= count - 4; i += 4) {
+      // ------------------ 块 1 ------------------
+      const int64_t dim_idx_0 = dim_idxs[i];
+      if (OB_UNLIKELY(dim_idx_0 < 0 || dim_idx_0 >= dim_count)) {
+        ret = OB_ARRAY_OUT_OF_RANGE;
+        LOG_WARN("dim index out of range", K(ret), K(dim_idx_0), K(dim_count));
+      } else {
+        boolean_relevances_[dim_idx_0] = relevances[i];
+      }
+      // ------------------ 块 2 ------------------
+      if (OB_SUCC(ret)) { // 必须检查上一步是否成功
+        const int64_t dim_idx_1 = dim_idxs[i+1];
+        if (OB_UNLIKELY(dim_idx_1 < 0 || dim_idx_1 >= dim_count)) {
+          ret = OB_ARRAY_OUT_OF_RANGE;
+          LOG_WARN("dim index out of range", K(ret), K(dim_idx_1), K(dim_count));
+        } else {
+          boolean_relevances_[dim_idx_1] = relevances[i+1];
+        }
+      }
+      // ------------------ 块 3 ------------------
+      if (OB_SUCC(ret)) { // 必须检查上一步是否成功
+        const int64_t dim_idx_2 = dim_idxs[i+2];
+        if (OB_UNLIKELY(dim_idx_2 < 0 || dim_idx_2 >= dim_count)) {
+          ret = OB_ARRAY_OUT_OF_RANGE;
+          LOG_WARN("dim index out of range", K(ret), K(dim_idx_2), K(dim_count));
+        } else {
+          boolean_relevances_[dim_idx_2] = relevances[i+2];
+        }
+      }
+      // ------------------ 块 4 ------------------
+      if (OB_SUCC(ret)) { // 必须检查上一步是否成功
+        const int64_t dim_idx_3 = dim_idxs[i+3];
+        if (OB_UNLIKELY(dim_idx_3 < 0 || dim_idx_3 >= dim_count)) {
+          ret = OB_ARRAY_OUT_OF_RANGE;
+          LOG_WARN("dim index out of range", K(ret), K(dim_idx_3), K(dim_count));
+        } else {
+          boolean_relevances_[dim_idx_3] = relevances[i+3];
+        }
+      }
+    }
+    for (; OB_SUCC(ret) && i < count; ++i) { // 循环控制中包含 ret 检查
+      const int64_t dim_idx = dim_idxs[i];
+      if (OB_UNLIKELY(dim_idx < 0 || dim_idx >= dim_count)) {
+        ret = OB_ARRAY_OUT_OF_RANGE;
+        LOG_WARN("dim index out of range", K(ret), K(dim_idx), K(dim_count));
+      } else {
+        boolean_relevances_[dim_idx] = relevances[i];
+      }
+    }
+
+    return ret;
+}
+
 int ObSRDaaTBooleanRelevanceCollector::get_result(double &relevance, bool &is_valid)
 {
   int ret = OB_SUCCESS;
@@ -113,10 +210,17 @@ int ObSRDaaTBooleanRelevanceCollector::get_result(double &relevance, bool &is_va
     LOG_WARN("failed to evaluate boolean relevance");
   } else {
     is_valid = relevance > 0;
-    for (int64_t i = 0; i < dim_cnt_; ++i) {
-      boolean_relevances_[i] = 0.0;
+    const int64_t dim_count = dim_cnt_;
+    __m512d zero = _mm512_setzero_pd();
+    int64_t i = 0;
+    for (; i <= dim_count - 8; i += 8) {
+      _mm512_storeu_pd(&boolean_relevances_[i], zero);
+    }    
+    // 处理剩余的非 SIMD 部分
+    for (; i < dim_count; ++i) {
+      boolean_relevances_[i] = 0.0; // 标量赋值
     }
-  }
+  }  
   return ret;
 }
 

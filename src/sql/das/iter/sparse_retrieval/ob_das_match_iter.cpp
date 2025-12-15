@@ -649,6 +649,45 @@ int ObDasBestfieldCollector::collect_one_dim(const int64_t dim_idx, const double
   return ret;
 }
 
+int ObDasBestfieldCollector::collect_batch_dims(
+    const int64_t *dim_idxs,
+    const double *relevances,
+    int64_t count)
+{
+  int ret = OB_SUCCESS;
+  if (count == 0) {
+    return OB_SUCCESS;
+  }
+
+#if defined(__AVX512F__)
+  __m512d current_max_vec = _mm512_set1_pd(max_relevance_); // 初始化 8 个 double 累加器
+  int64_t i = 0;
+  for (; i <= count - 8; i += 8) {
+    __m512d scores = _mm512_loadu_pd(&relevances[i]);
+    current_max_vec = _mm512_max_pd(current_max_vec, scores);
+  }
+  double simd_max = _mm512_reduce_max_pd(current_max_vec);
+  double scalar_max_tail = -DBL_MAX;
+  for (; i < count; ++i) {
+    if (relevances[i] > scalar_max_tail) {
+      scalar_max_tail = relevances[i];
+    }
+  }
+  max_relevance_ = std::max({max_relevance_, simd_max, scalar_max_tail});
+
+#else
+  double current_max = max_relevance_;
+  for (int64_t i = 0; i < count; ++i) {
+    if (relevances[i] > current_max) {
+      current_max = relevances[i];
+    }
+  }
+  max_relevance_ = current_max;
+#endif
+
+  return ret;
+}
+
 int ObDasBestfieldCollector::get_result(double &relevance, bool &is_valid)
 {
   int ret = OB_SUCCESS;

@@ -327,7 +327,6 @@ int ObSRBMWIterImpl::build_top_k_heap()
 int ObSRBMWIterImpl::process_collected_row(const ObDatum &id_datum, const double relevance)
 {
   int ret = OB_SUCCESS;
-  // 🔥 ID范围过滤 - 主键id过滤（doc_id就是主表的id主键）
   if (enable_id_range_filter_) {
     int64_t doc_id = id_datum.get_int();
     if (id_lower_bound_ > 0 && doc_id < id_lower_bound_) {
@@ -340,14 +339,6 @@ int ObSRBMWIterImpl::process_collected_row(const ObDatum &id_datum, const double
       ++two_phase_stats_.scalar_filtered_count_;
       LOG_DEBUG("[Scalar Filter] Document filtered by ID upper bound",
                 K(doc_id), K_(id_upper_bound));
-      return OB_SUCCESS;
-    }
-  }
-  // 🔥 标量过滤候选集检查 - 用于复杂过滤场景
-  if (enable_scalar_filter_ && OB_NOT_NULL(scalar_candidates_)) {
-    if (!scalar_candidates_->contains(id_datum)) {
-      // 文档不在候选集中，直接返回，跳过所有计算
-      ++two_phase_stats_.scalar_filtered_count_;
       return OB_SUCCESS;
     }
   }
@@ -1037,22 +1028,16 @@ double ObSRBMWIterImpl::predict_optimal_threshold() const
   const double min_score = two_phase_stats_.phase1_min_score_;
   const double avg_score = two_phase_stats_.phase1_avg_score_;
   const double max_score = two_phase_stats_.phase1_max_score_;
-  const double score_range = max_score - min_score;
-  const double avg_deviation = avg_score - min_score;
   double predicted_threshold = min_score;
-  if (avg_deviation > 0 && score_range > 0) {
-    const double spread_ratio = avg_deviation / score_range;
-    if (spread_ratio < 0.3) {
-      predicted_threshold = min_score * 1.1;  // 10% above baseline
-    } else if (spread_ratio < 0.6) {
-      predicted_threshold = (min_score + avg_score) / 2.0;
-    } else {
-      predicted_threshold = min_score;
+  if (min_score > 0 && avg_score > min_score) {
+    predicted_threshold = min_score + PREDICTION_ALPHA * (avg_score - min_score);
+    if (predicted_threshold > max_score) {
+      predicted_threshold = max_score;
     }
   }
-  LOG_DEBUG("[Two-Phase] Predicted optimal threshold", 
+
+  LOG_DEBUG("[Two-Phase] Predicted optimal threshold (Improved)", 
       K(predicted_threshold), K(min_score), K(avg_score), K(max_score));
-  
   return predicted_threshold;
 }
 

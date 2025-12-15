@@ -77,6 +77,9 @@ struct ObDasBestfieldCollector : ObSRDaaTRelevanceCollector
   virtual void reset() override;
   virtual void reuse() override;
   virtual int collect_one_dim(const int64_t dim_idx, const double) override;
+  virtual int collect_batch_dims(const int64_t *dim_idxs,
+                                 const double *relevances,
+                                 int64_t count) override;
   virtual int get_result(double &relevance, bool &is_valid) override;
 private:
   double max_relevance_;

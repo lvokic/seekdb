@@ -98,7 +98,6 @@ ob_set_subtarget(ob_sql das
   das/iter/ob_das_domain_id_merge_iter.cpp
   das/iter/ob_das_vec_scan_utils.cpp
   das/iter/sparse_retrieval/ob_das_tr_merge_iter.cpp
-  das/iter/sparse_retrieval/ob_das_match_iter.cpp
 )
 
 ob_set_subtarget(ob_sql dtl
@@ -1491,6 +1490,7 @@ ob_set_subtarget(ob_sql_simd common
   engine/basic/ob_pushdown_filter_simd.cpp
   engine/basic/ob_byte_compare_simd.cpp
   engine/px/ob_px_bloom_filter_simd.cpp
+  das/iter/sparse_retrieval/ob_das_match_iter.cpp
 )
 
 ob_server_add_target(ob_sql_simd)
@@ -1498,7 +1498,7 @@ ob_server_add_target(ob_sql_simd)
 if (${ARCHITECTURE} STREQUAL "x86_64")
 	target_compile_options(ob_sql_simd
 	  PRIVATE
-		-mtune=core-avx2 -mavx2 -mfma -mbmi2 -mavx512vl -mavx512bw
+		-mtune=core-avx2 -mavx2 -mfma -mbmi2 -mavx512vl -mavx512bw -mavx512f
 	)
 endif()
 

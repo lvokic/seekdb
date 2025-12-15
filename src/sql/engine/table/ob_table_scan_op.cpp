@@ -4128,7 +4128,7 @@ int ObTableScanOp::get_output_fts_col_expr_by_type(
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("unexpected error, expr in output is nullptr", K(ret), K(i));
       } else if (T_FUN_SYS_WORD_SEGMENT == tmp_expr->type_) {
-        const int64_t idx = MY_SPEC.is_fts_index_aux_ ? i+1 : i-1;
+        const int64_t idx = MY_SPEC.is_fts_index_aux_ ? i+1 : i-2;
         if (OB_UNLIKELY(idx < 0 || idx >= MY_SPEC.output_.count())) {
           ret = OB_ERR_UNEXPECTED;
           LOG_WARN("unexpected error, invalid doc id idx", K(ret), K(idx), K(i), K(MY_SPEC.output_));
