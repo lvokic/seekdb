@@ -2127,7 +2127,7 @@ int ObFtsIndexBuilderUtil::calc_token_hash(
     uint64_t &hash_val)
 {
   int ret = OB_SUCCESS;
-  if (token.empty()) {
+  if (OB_UNLIKELY(token.empty())) {
     hash_val = 0;
   } else {
     hash_val = common::murmurhash64A(token.ptr(), token.length(), 0);
