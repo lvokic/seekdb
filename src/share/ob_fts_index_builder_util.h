@@ -67,9 +67,9 @@ public:
   static constexpr const char *ROWKEY_DOC_NAME = "fts_rowkey_doc";
   static constexpr const char *FTS_TOKEN_HASH_COLUMN_NAME = "__fts_token_hash";
   static const int64_t OB_FTS_INDEX_TABLE_INDEX_COL_CNT = 3;
-  static const int64_t OB_FTS_DOC_WORD_TABLE_INDEX_COL_CNT = 3;
+  static const int64_t OB_FTS_DOC_WORD_TABLE_INDEX_COL_CNT = 2;
   static const int64_t OB_FTS_INDEX_TABLE_COLUMN_CNT = 5;
-  static const int64_t OB_FTS_DOC_WORD_TABLE_COLUMN_CNT = 5;
+  static const int64_t OB_FTS_DOC_WORD_TABLE_COLUMN_CNT = 4;
 public:
   // Check if we can use rowkey instead of doc id.
   // if we want to add more types, make this one condition of them.

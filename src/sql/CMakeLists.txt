@@ -356,7 +356,6 @@ ob_set_subtarget(ob_sql engine_expr
   engine/expr/ob_expr_bit_or.cpp
   engine/expr/ob_expr_bit_right_shift.cpp
   engine/expr/ob_expr_bit_xor.cpp
-  engine/expr/ob_expr_bm25.cpp
   engine/expr/ob_expr_bool.cpp
   engine/expr/ob_expr_calc_partition_id.cpp
   engine/expr/ob_expr_case.cpp
@@ -1490,6 +1489,7 @@ ob_set_subtarget(ob_sql_simd common
   engine/basic/ob_pushdown_filter_simd.cpp
   engine/basic/ob_byte_compare_simd.cpp
   engine/px/ob_px_bloom_filter_simd.cpp
+  engine/expr/ob_expr_bm25.cpp
   das/iter/sparse_retrieval/ob_das_match_iter.cpp
 )
 

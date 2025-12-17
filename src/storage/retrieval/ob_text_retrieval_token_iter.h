@@ -130,6 +130,7 @@ private:
   common::ObSEArray<sql::ObExpr *, 2> relevance_calc_exprs_;
   sql::ObBitVector *skip_;
   ObObj *fwd_range_objs_;
+  ObObj *inv_range_objs_;
   int64_t max_batch_size_;
   int64_t token_doc_cnt_;
   double max_token_relevance_;

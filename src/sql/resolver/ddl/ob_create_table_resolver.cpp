@@ -1544,6 +1544,52 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
         SQL_RESV_LOG(WARN, "resolve_primary_key_node_in_heap_table failed", K(ret));
       }
     }
+
+    // [AUTO-INDEX OPTIMIZATION START]
+    if (OB_SUCC(ret)) {
+      ObCreateTableStmt *create_table_stmt = static_cast<ObCreateTableStmt*>(stmt_);
+      ObTableSchema &table_schema = create_table_stmt->get_create_table_arg().schema_;
+      // 遍历所有列
+      for (int64_t i = 0; OB_SUCC(ret) && i < table_schema.get_column_count(); ++i) {
+        ObColumnSchemaV2 *col = table_schema.get_column_schema_by_idx(i);
+        if (OB_NOT_NULL(col) && col->is_autoincrement()) {
+          bool has_index = false;
+          const ObSArray<obrpc::ObCreateIndexArg> &indexes = create_table_stmt->get_index_arg_list();
+          if (!has_index) {
+            obrpc::ObCreateIndexArg auto_idx_arg;
+            index_arg_.reset();
+            sort_column_array_.reset();
+            ObColumnSortItem sort_item;
+            sort_item.column_name_ = col->get_column_name_str();
+            sort_item.order_type_ = common::ObOrderType::ASC;
+            sort_item.prefix_len_ = 0;
+            if (OB_FAIL(add_sort_column(sort_item))) {
+              SQL_RESV_LOG(WARN, "failed to add auto index column", K(ret));
+            }
+            if (OB_SUCC(ret)) {
+              char idx_name_buf[128];
+              snprintf(idx_name_buf, sizeof(idx_name_buf), "idx_auto_%.*s", 
+                        col->get_column_name_str().length(), col->get_column_name_str().ptr());
+              index_name_.assign_ptr(idx_name_buf, strlen(idx_name_buf));
+            }
+            if (OB_FAIL(generate_index_arg(false))) {
+              SQL_RESV_LOG(WARN, "failed to generate auto index arg", K(ret));
+            }
+            if (OB_SUCC(ret)) {
+              // 构造对应的 Partition Resolve Result (普通索引通常为空或跟随主表)
+              ObPartitionResolveResult resolve_result; 
+              // 这一步模仿 resolve_index_node 的最后部分
+              if (OB_FAIL(create_table_stmt->get_index_partition_resolve_results().push_back(resolve_result))) {
+                  SQL_RESV_LOG(WARN, "failed to push resolve result", K(ret));
+              } else if (OB_FAIL(create_table_stmt->get_index_arg_list().push_back(index_arg_))) {
+                  SQL_RESV_LOG(WARN, "failed to push index arg", K(ret));
+              }
+            }
+          }
+        }
+      }
+    }
+    // [AUTO-INDEX OPTIMIZATION END]
     LOG_DEBUG("resolve table elements end ", K(resolve_rule), K(table_schema));
   }
   return ret;

@@ -548,9 +548,7 @@ int ObFtsIndexBuilderUtil::adjust_fts_args(
     } else if (is_doc_word) {
       if (OB_FAIL(push_back_gen_col(tmp_cols, existing_rowkey_col, nullptr))) {
         LOG_WARN("failed to push back doc id col", K(ret));
-      } else if (OB_FAIL(push_back_gen_col(tmp_cols, existing_token_hash_col, generated_token_hash_col))) {
-        LOG_WARN("failed to push back token hash col", K(ret));
-      }  else if (OB_FAIL(push_back_gen_col(tmp_cols, existing_word_col, generated_word_col))) {
+      } else if (OB_FAIL(push_back_gen_col(tmp_cols, existing_word_col, generated_word_col))) {
         LOG_WARN("failed to push back word col", K(ret));
       } else if (OB_FAIL(push_back_gen_col(tmp_cols, existing_word_count_col, generated_word_count_col))) {
         LOG_WARN("failed to push back word count col", K(ret));
@@ -805,7 +803,7 @@ int ObFtsIndexBuilderUtil::set_fts_index_table_columns(
 {
   int ret = OB_SUCCESS;
   const bool is_main_index = share::schema::is_fts_index_aux(arg.index_type_);
-  const int expected_index_col_cnt = 3;
+  const int expected_index_col_cnt = is_main_index ? 3 : 2;
   if (!data_schema.is_valid() ||
       (!is_main_index &&
       !share::schema::is_fts_doc_word_aux(arg.index_type_)) ||
@@ -959,7 +957,7 @@ int ObFtsIndexBuilderUtil::adjust_fts_arg(
     if ((is_rowkey_doc && fts_cols.count() != 1) ||
         (is_doc_rowkey && fts_cols.count() != 1) ||
         (is_fts_index && fts_cols.count() != 5) ||
-        (is_doc_word && fts_cols.count() != 5) ) {
+        (is_doc_word && fts_cols.count() != 4) ) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("fts cols count not expected", K(ret), K(index_type), K(fts_cols));
     } else {

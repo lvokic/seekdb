@@ -1820,6 +1820,10 @@ struct NullAwareAntiJoinInfo {
                                         ObIndexMergeNode *&candi_node,
                                         bool &is_valid_node);
 
+    int try_merge_intersect_child(ObIndexMergeNode *intersect_node,
+                                  ObRawExpr *new_filter,
+                                  bool &merge_happened);
+
     int collect_candicate_indexes(const uint64_t ref_table_id,
                                   ObRawExpr *filter,
                                   ObIArray<uint64_t> &valid_index_ids,

@@ -66,6 +66,7 @@ public:
     MEMCPY(data_, src.data_, byte_count(size));
   }
   inline void set(const int64_t idx);
+  inline void set(const int64_t idx, const int64_t count);
   OB_INLINE void atomic_set(const int64_t idx);
   inline void unset(const int64_t idx);
   OB_INLINE WordType *align_at(const int64_t idx)
@@ -244,6 +245,33 @@ inline void ObBitVectorImpl<WordType>::set(const int64_t idx)
 {
   OB_ASSERT(idx >= 0);
   data_[idx / WORD_BITS] |= 1LU << (idx % WORD_BITS);
+}
+
+template<typename WordType>
+inline void ObBitVectorImpl<WordType>::set(const int64_t start_idx, const int64_t count)
+{
+  OB_ASSERT(start_idx >= 0);
+  OB_ASSERT(count > 0);
+  int64_t current_idx = start_idx;
+  int64_t remaining_count = count;
+  const int64_t word_offset = current_idx % WORD_BITS;
+  if (word_offset != 0) {
+    const int64_t bits_in_first_word = WORD_BITS - word_offset;
+    const int64_t bits_to_set = std::min(remaining_count, bits_in_first_word);
+    const uint64_t mask = ((1ULL << bits_to_set) - 1ULL) << word_offset;
+    data_[current_idx / WORD_BITS] |= mask;
+    current_idx += bits_to_set;
+    remaining_count -= bits_to_set;
+  }
+  while (remaining_count >= WORD_BITS) {
+    data_[current_idx / WORD_BITS] = ~0ULL; // 设置整个字为 1 (0xFF...FF)
+    current_idx += WORD_BITS;
+    remaining_count -= WORD_BITS;
+  }
+  if (remaining_count > 0) {
+    const uint64_t mask = (1ULL << remaining_count) - 1ULL;
+    data_[current_idx / WORD_BITS] |= mask;
+  }
 }
 
 template<typename WordType>

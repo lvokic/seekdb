@@ -3,7 +3,16 @@ SOURCE_DIR=$(readlink -f "$(dirname ${BASH_SOURCE[0]})/../..")
 
 if [ $# -lt 1 ]
 then
-  BUILD_DIR=$(find $SOURCE_DIR -maxdepth 1 -name 'build_*' -type d | grep -v 'build_ccls'  | head -1)
+  # [修改开始] ---------------------------------------
+  # 1. 优先尝试查找 build_release 开头的目录
+  BUILD_DIR=$(find $SOURCE_DIR -maxdepth 1 -name 'build_release*' -type d | head -1)
+
+  # 2. 如果找不到 release，再回退到原来的逻辑（找任意 build_*，比如 debug）
+  if [[ "$BUILD_DIR" == "" ]]; then
+    BUILD_DIR=$(find $SOURCE_DIR -maxdepth 1 -name 'build_*' -type d | grep -v 'build_ccls'  | head -1)
+  fi
+  # [修改结束] ---------------------------------------
+
   if [[ "$BUILD_DIR" == "" ]]
   then
     echo "Usage ./copy.sh [oceanbase_dev_dir]"

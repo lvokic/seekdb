@@ -48,8 +48,8 @@ ObExprOperatorType ObFTIndexRowCache::FTS_INDEX_EXPR_TYPE[] = {
     T_FUN_SYS_WORD_COUNT,
     T_FUN_SYS_DOC_LENGTH
 };
-ObObjDatumMapType ObFTIndexRowCache::FTS_DOC_WORD_TYPES[] = {OBJ_DATUM_STRING, OBJ_DATUM_8BYTE_DATA, OBJ_DATUM_STRING, OBJ_DATUM_8BYTE_DATA, OBJ_DATUM_8BYTE_DATA};
-ObExprOperatorType ObFTIndexRowCache::FTS_DOC_WORD_EXPR_TYPE[] = {T_FUN_SYS_DOC_ID, T_FUN_SYS_TOKEN_HASH, T_FUN_SYS_WORD_SEGMENT, T_FUN_SYS_WORD_COUNT, T_FUN_SYS_DOC_LENGTH};
+ObObjDatumMapType ObFTIndexRowCache::FTS_DOC_WORD_TYPES[] = {OBJ_DATUM_STRING, OBJ_DATUM_STRING, OBJ_DATUM_8BYTE_DATA, OBJ_DATUM_8BYTE_DATA};
+ObExprOperatorType ObFTIndexRowCache::FTS_DOC_WORD_EXPR_TYPE[] = {T_FUN_SYS_DOC_ID, T_FUN_SYS_WORD_SEGMENT, T_FUN_SYS_WORD_COUNT, T_FUN_SYS_DOC_LENGTH};
 
 ObFTIndexRowCache::ObFTIndexRowCache()
   : rows_(),
@@ -400,20 +400,24 @@ int ObDASDomainUtils::build_ft_doc_word_infos(
           } else {
             const ObFTWord &ft_word = iter->first;
             const int64_t word_cnt = iter->second;
-            const int64_t hash_idx = is_fts_index_aux ? 0 : 1;
-            const int64_t word_idx = is_fts_index_aux ? 1 : 2;
+            const int64_t hash_idx = is_fts_index_aux ? 0 : -1;
+            const int64_t word_idx = 1;
             const int64_t doc_id_idx = is_fts_index_aux ? 2 : 0;
-            const int64_t word_cnt_idx = 3;
-            const int64_t doc_len_idx = 4;
-            uint64_t token_hash = 0;
-            if (OB_FAIL(ft_word.hash(token_hash))) {
-              LOG_WARN("failed to calc token hash", K(ret), K(ft_word));
-            } else {
-              rows[i].storage_datums_[hash_idx].set_uint(token_hash);
+            const int64_t word_cnt_idx = is_fts_index_aux ? 3 : 2;
+            const int64_t doc_len_idx = is_fts_index_aux ? 4 : 3;
+            if (is_fts_index_aux) {
+              uint64_t token_hash = 0;
+              if (OB_FAIL(ft_word.hash(token_hash))) {
+                LOG_WARN("failed to calc token hash", K(ret), K(ft_word));
+              } else {
+                rows[i].storage_datums_[hash_idx].set_uint(token_hash);
+              }
+            }
+            if (OB_SUCC(ret)) {
+               rows[i].storage_datums_[word_idx].set_datum(ft_word.get_word());
             }
             if (OB_SUCC(ret)) {
                 rows[i].storage_datums_[doc_id_idx].shallow_copy_from_datum(doc_id_datum);
-                rows[i].storage_datums_[word_idx].set_datum(ft_word.get_word());
                 rows[i].storage_datums_[word_cnt_idx].set_uint(word_cnt);
                 rows[i].storage_datums_[doc_len_idx].set_uint(doc_length);
                 if (OB_FAIL(word_rows.push_back(&rows[i]))) {
@@ -1346,15 +1350,14 @@ int ObFTDMLIterator::build_ft_word_row(
   int ret = OB_SUCCESS;
   const bool is_fts_index = das_ctdef_->table_param_.get_data_table().is_fts_index_aux();
   const int64_t SRC_DOC_ID_IDX = 0;
-  const int64_t SRC_HASH_IDX = 1;
-  const int64_t SRC_WORD_IDX = 2;
-  const int64_t SRC_WORD_COUNT_IDX = 3;
-  const int64_t SRC_DOC_LENGTH_IDX = 4;
-  const int64_t DEST_HASH_IDX = is_fts_index ? 0 : 1;
-  const int64_t DEST_WORD_IDX = is_fts_index ? 1 : 2;
-  const int64_t DEST_DOC_ID_IDX = is_fts_index ? 2 : 0;
-  const int64_t DEST_WORD_COUNT_IDX = 3;
-  const int64_t DEST_DOC_LENGTH_IDX = 4;
+  const int64_t SRC_WORD_IDX = 1;
+  const int64_t SRC_WORD_COUNT_IDX = 2;
+  const int64_t SRC_DOC_LENGTH_IDX = 3;
+  const int64_t DEST_HASH_IDX = is_fts_index ? 0 : -1;
+  const int64_t DEST_WORD_IDX = is_fts_index ? 1 : SRC_WORD_IDX;
+  const int64_t DEST_DOC_ID_IDX = is_fts_index ? 2 : SRC_DOC_ID_IDX;
+  const int64_t DEST_WORD_COUNT_IDX = is_fts_index ? 3 : SRC_WORD_COUNT_IDX;
+  const int64_t DEST_DOC_LENGTH_IDX = is_fts_index ? 4 : SRC_DOC_LENGTH_IDX;
   const int64_t src_col_cnt = share::ObFtsIndexBuilderUtil::OB_FTS_DOC_WORD_TABLE_COLUMN_CNT;
   const int64_t dest_col_cnt = is_fts_index
       ? share::ObFtsIndexBuilderUtil::OB_FTS_INDEX_TABLE_COLUMN_CNT
@@ -1379,12 +1382,24 @@ int ObFTDMLIterator::build_ft_word_row(
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected column types for ft index", K(ret), K(DEST_WORD_IDX), K(das_ctdef_->column_types_.count()));
   } else {
+    if (is_fts_index) {
+      uint64_t token_hash = 0;
+      const ObDatum &word_datum = src_row->storage_datums_[SRC_WORD_IDX];
+      if (word_datum.is_null()) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("word datum is null", K(ret));
+      } else if (OB_FAIL(share::ObFtsIndexBuilderUtil::calc_token_hash(
+                     das_ctdef_->column_types_.at(DEST_WORD_IDX),
+                     word_datum.get_string(),
+                     token_hash))) {
+        LOG_WARN("failed to calc token hash", K(ret), K(word_datum));
+      } else {
+        tmp_row->storage_datums_[DEST_HASH_IDX].set_uint(token_hash);
+      }
+    }
     if (FAILEDx(tmp_row->storage_datums_[DEST_DOC_ID_IDX].deep_copy(
             src_row->storage_datums_[SRC_DOC_ID_IDX], allocator_))) {
       LOG_WARN("fail to deep copy doc id datum", K(ret), K(DEST_DOC_ID_IDX));
-    } else if (OB_FAIL(tmp_row->storage_datums_[DEST_HASH_IDX].deep_copy(
-                   src_row->storage_datums_[SRC_HASH_IDX], allocator_))) {
-      LOG_WARN("fail to deep copy hash datum", K(ret), K(DEST_HASH_IDX));
     } else if (OB_FAIL(tmp_row->storage_datums_[DEST_WORD_IDX].deep_copy(
                    src_row->storage_datums_[SRC_WORD_IDX], allocator_))) {
       LOG_WARN("fail to deep copy word segment datum", K(ret), K(DEST_WORD_IDX));
@@ -1413,8 +1428,8 @@ int ObFTDMLIterator::get_ft_and_doc_id(const ObChunkDatumStore::StoredRow *store
     LOG_WARN("invalid doc id or fulltext column id", K(ret), K(fts_col_id));
   } else {
     const bool is_fts_index_aux = das_ctdef_->table_param_.get_data_table().is_fts_index_aux();
-    const int64_t doc_id_idx = !is_fts_index_aux ? 0 : 2;
-    const int64_t ft_idx = !is_fts_index_aux ? 2 : 1;
+    const int64_t doc_id_idx = !is_fts_index_aux ? 0 : 1;
+    const int64_t ft_idx = !is_fts_index_aux ? 1 : 0;
 
     ft = store_row->cells()[row_projector_->at(ft_idx)].get_string();
     ft_meta = das_ctdef_->column_types_.at(ft_idx);
@@ -1447,8 +1462,8 @@ int ObFTDMLIterator::get_ft_and_doc_id_for_update(const ObChunkDatumStore::Store
     LOG_WARN("invalid project count", K(ret), K(rowkey_col_cnt), K(old_proj_cnt), K(new_proj_cnt));
   } else {
     const bool is_fts_index_aux = das_ctdef_->table_param_.get_data_table().is_fts_index_aux();
-    const int64_t doc_id_idx = !is_fts_index_aux ? 0 : 2;
-    const int64_t ft_idx = !is_fts_index_aux ? 2 : 1;
+    const int64_t doc_id_idx = !is_fts_index_aux ? 0 : 1;
+    const int64_t ft_idx = !is_fts_index_aux ? 1 : 0;
 
     doc_id_datum = store_row->cells()[row_projector_->at(doc_id_idx)];
 

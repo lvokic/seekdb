@@ -141,4 +141,6 @@ grep -a -C 5 "YB427F000001-000645BDAF8A2057-0-0" observer.log
 grep -a "ob_table_scan_op.cpp" observer.log | grep "init_ddl_column_checksum" | grep "ret=-4002" | tail -n 5
 
 
+explain SELECT/*+ INDEX_MERGE(test_insert_en idx_base_id ft_fulltext) */     docid_col,      MATCH(fulltext_col) AGAINST('What organization proposed listing PFOA under the Stockholm Convention' IN NATURAL LANGUAGE MODE) as _score FROM test_insert_en WHERE MATCH(fulltext_col) AGAINST('What organization proposed listing PFOA under the Stockholm Convention' IN NATURAL LANGUAGE MODE)    AND base_id IN ('base_id_1', 'base_id_2', 'base_id_3')    AND id < 1000  ORDER BY _score DESC LIMIT 5;
+
 b ob_join_order.cpp:20367

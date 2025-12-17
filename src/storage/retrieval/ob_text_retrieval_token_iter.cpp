@@ -20,6 +20,7 @@
 #include "sql/engine/expr/ob_expr_bm25.h"
 #include "sql/das/iter/sparse_retrieval/ob_das_tr_merge_iter.h"
 #include "share/ob_fts_index_builder_util.h"
+#include "share/ob_token_df_cache.h"
 
 namespace oceanbase
 {
@@ -45,6 +46,7 @@ ObTextRetrievalTokenIter::ObTextRetrievalTokenIter()
     relevance_calc_exprs_(),
     skip_(nullptr),
     fwd_range_objs_(nullptr),
+    inv_range_objs_(nullptr),
     max_batch_size_(0),
     token_doc_cnt_(0),
     max_token_relevance_(-1.0),
@@ -382,7 +384,29 @@ int ObTextRetrievalTokenIter::batch_fill_token_cnt_with_doc_len(const int64_t co
   } else {
     const ObDatum *datums = doc_length_expr->locate_batch_datums(*eval_ctx_);
     ObDatum *agg_datum = agg_expr->locate_batch_datums(*eval_ctx_);
-    for (int64_t i = 0; OB_SUCC(ret) && i < count; ++i) {
+    common::ObIAllocator &allocator = mem_context_->get_arena_allocator();
+    int64_t i = 0;
+    for (; OB_SUCC(ret) && i <= count - 4; i += 4) {
+      for (int k = 0; OB_SUCC(ret) && k < 4; ++k) {
+        int64_t idx = i + k;
+        if (OB_LIKELY(!skip_->at(idx))) {
+          if (agg_expr->datum_meta_.get_type() == ObDecimalIntType) {
+            if (OB_FAIL(set_decimal_int_by_precision(agg_datum[idx], datums[idx].get_uint(), agg_expr->datum_meta_.precision_))) {
+              LOG_WARN("fail to set decimal int", K(ret));
+            }
+          } else {
+            const int64_t in_val = datums[idx].get_uint64();
+            number::ObNumber nmb;
+            if (OB_FAIL(nmb.from(in_val, allocator))) { 
+              LOG_WARN("fail to int_number", K(ret), K(in_val));
+            } else {
+              agg_datum[idx].set_number(nmb);
+            }
+          }
+        }
+      }
+    }
+    for (; OB_SUCC(ret) && i < count; ++i) {
       if (OB_LIKELY(!skip_->at(i))) {
         if (agg_expr->datum_meta_.get_type() == ObDecimalIntType) {
           if (OB_FAIL(set_decimal_int_by_precision(agg_datum[i], datums[i].get_uint(), agg_expr->datum_meta_.precision_))) {
@@ -391,7 +415,7 @@ int ObTextRetrievalTokenIter::batch_fill_token_cnt_with_doc_len(const int64_t co
         } else {
           const int64_t in_val = datums[i].get_uint64();
           number::ObNumber nmb;
-          if (OB_FAIL(nmb.from(in_val, mem_context_->get_arena_allocator()))) {
+          if (OB_FAIL(nmb.from(in_val, allocator))) {
             LOG_WARN("fail to int_number", K(ret), K(in_val));
           } else {
             agg_datum[i].set_number(nmb);
@@ -580,12 +604,14 @@ int ObTextRetrievalTokenIter::set_decimal_int_by_precision(ObDatum &result_datum
                                                            const ObPrecision precision)
 {
   int ret = OB_SUCCESS;
-  if (precision <= MAX_PRECISION_DECIMAL_INT_64) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("unexpected precision, precision is too short", K(ret), K(precision));
-  } else if (precision <= MAX_PRECISION_DECIMAL_INT_128) {
-    const int128_t result = decint;
-    result_datum.set_decimal_int(result);
+  if (OB_UNLIKELY(precision <= MAX_PRECISION_DECIMAL_INT_128)) {
+    if (OB_UNLIKELY(precision <= MAX_PRECISION_DECIMAL_INT_64)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected precision, precision is too short", K(ret), K(precision));
+    } else {
+      const int128_t result = decint;
+      result_datum.set_decimal_int(result);
+    }
   } else if (precision <= MAX_PRECISION_DECIMAL_INT_256) {
     const int256_t result = decint;
     result_datum.set_decimal_int(result);
@@ -599,6 +625,47 @@ int ObTextRetrievalTokenIter::set_decimal_int_by_precision(ObDatum &result_datum
 int ObTextRetrievalTokenIter::estimate_token_doc_cnt()
 {
   int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!share::g_token_df_cache.is_inited_)) {
+    static lib::ObMutex s_init_lock;
+    lib::ObMutexGuard guard(s_init_lock);
+    if (!share::g_token_df_cache.is_inited_) {
+      int init_ret = share::g_token_df_cache.init();
+      if (OB_SUCCESS != init_ret) {
+        LOG_WARN("global token df cache init failed, will skip cache", K(init_ret));
+      }
+    }
+  }
+  share::ObTokenDFCacheKey cache_key;
+  if (share::g_token_df_cache.is_inited_) {
+    cache_key.set_table_id(inv_idx_agg_param_->key_ranges_.at(0).table_id_);
+    cache_key.set_index_id(inv_idx_agg_param_->index_id_);
+    cache_key.set_schema_version(inv_idx_agg_param_->schema_version_);
+    if (inv_idx_agg_param_->key_ranges_.count() > 0) {
+      const ObNewRange &range = inv_idx_agg_param_->key_ranges_.at(0);
+      const ObObj *objs = range.start_key_.get_obj_ptr();
+      if (nullptr != objs && range.start_key_.get_obj_cnt() > INV_IDX_TOKEN_KEY_IDX) {
+        const ObObj &token_obj = objs[INV_IDX_TOKEN_KEY_IDX];
+        if (token_obj.is_string_type()) {
+          cache_key.set_token(token_obj.get_string());
+        }
+      }
+    }
+    if (cache_key.has_token()) {
+      share::ObTokenDFCacheHandle handle;
+      const share::ObTokenDFCacheValue *cache_value = nullptr;
+      if (OB_FAIL(share::g_token_df_cache.get_token_df(cache_key, cache_value, handle))) {
+        // [Error] 访问缓存出错，继续走估算逻辑
+        ret = OB_SUCCESS;
+      } else if (OB_NOT_NULL(cache_value)) {
+        // [Hit] 缓存命中，直接赋值
+        token_doc_cnt_ = cache_value->get_token_doc_cnt();
+        max_token_relevance_ = cache_value->get_max_token_relevance();
+        token_doc_cnt_calculated_ = true;
+        LOG_DEBUG("token df cache hit", K(cache_key), K(token_doc_cnt_));
+        return ret;
+      }
+    }
+  }
   int64_t logical_row_cnt = 0;
   int64_t physical_row_cnt = 0;
   ObSEArray<ObEstRowCountRecord, 1> est_records;
@@ -645,6 +712,12 @@ int ObTextRetrievalTokenIter::estimate_token_doc_cnt()
         total_doc_cnt = total_doc_cnt_param_expr->locate_expr_datum(*eval_ctx_, 0).get_int();
       }
       max_token_relevance_ = sql::ObExprBM25::query_token_weight(token_doc_cnt_, total_doc_cnt);
+      if (share::g_token_df_cache.is_inited_ && cache_key.has_token()) {
+        share::ObTokenDFCacheValue cache_value(token_doc_cnt_, max_token_relevance_);
+        if (OB_SUCCESS != share::g_token_df_cache.put_token_df(cache_key, cache_value)) {
+          LOG_WARN("failed to put token df cache", K(cache_key));
+        }
+      }
     }
   }
   return ret;
@@ -770,8 +843,36 @@ int ObTextRetrievalDaaTTokenIter::save_relevances_and_docids()
     cur_idx_ = 0;
     const ObDatumVector &relevance_datum = relevance_expr_->locate_expr_datumvector(*eval_ctx_);
     const ObDatumVector &doc_id_datum = inv_scan_domain_id_col_->locate_expr_datumvector(*eval_ctx_);
-    for (int64_t i = 0; OB_SUCC(ret) && i < count_; ++i) {
-      if (OB_LIKELY(!token_iter_->get_skip()->at(i))) {
+    const ObBitVector *skip_vec = token_iter_->get_skip(); 
+    int64_t i = 0;
+    for (; OB_SUCC(ret) && i <= count_ - 4; i += 4) {
+      if (OB_LIKELY(!skip_vec->at(i))) {
+        relevance_[i] = relevance_datum.at(i)->get_double();
+        if (OB_FAIL(doc_id_[i].from_datum(*doc_id_datum.at(i)))) {
+          LOG_WARN("failed to get doc id", K(ret), K(doc_id_datum.at(i)));
+        }
+      }
+      if (OB_SUCC(ret) && OB_LIKELY(!skip_vec->at(i + 1))) {
+        relevance_[i + 1] = relevance_datum.at(i + 1)->get_double();
+        if (OB_FAIL(doc_id_[i + 1].from_datum(*doc_id_datum.at(i + 1)))) {
+          LOG_WARN("failed to get doc id", K(ret), K(doc_id_datum.at(i + 1)));
+        }
+      }
+      if (OB_SUCC(ret) && OB_LIKELY(!skip_vec->at(i + 2))) {
+        relevance_[i + 2] = relevance_datum.at(i + 2)->get_double();
+        if (OB_FAIL(doc_id_[i + 2].from_datum(*doc_id_datum.at(i + 2)))) {
+          LOG_WARN("failed to get doc id", K(ret), K(doc_id_datum.at(i + 2)));
+        }
+      }
+      if (OB_SUCC(ret) && OB_LIKELY(!skip_vec->at(i + 3))) {
+        relevance_[i + 3] = relevance_datum.at(i + 3)->get_double();
+        if (OB_FAIL(doc_id_[i + 3].from_datum(*doc_id_datum.at(i + 3)))) {
+          LOG_WARN("failed to get doc id", K(ret), K(doc_id_datum.at(i + 3)));
+        }
+      }
+    }
+    for (; OB_SUCC(ret) && i < count_; ++i) {
+      if (OB_LIKELY(!skip_vec->at(i))) {
         relevance_[i] = relevance_datum.at(i)->get_double();
         if (OB_FAIL(doc_id_[i].from_datum(*doc_id_datum.at(i)))) {
           LOG_WARN("failed to get doc id", K(ret), K(doc_id_datum.at(i)));
