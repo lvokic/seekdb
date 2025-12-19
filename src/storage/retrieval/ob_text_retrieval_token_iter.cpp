@@ -988,7 +988,8 @@ ObTextRetrievalBlockMaxIter::ObTextRetrievalBlockMaxIter()
     in_shallow_status_(false),
     is_inited_(false),
     hash_only_param_(),
-    hash_only_ranges_()
+    hash_only_ranges_(),
+    scan_param_(nullptr)
 {
 }
 
@@ -1015,6 +1016,7 @@ int ObTextRetrievalBlockMaxIter::init(
     in_shallow_status_ = false;
     ranking_param_.token_freq_col_idx_ = block_max_iter_param.token_freq_col_idx_;
     ranking_param_.doc_length_col_idx_ = block_max_iter_param.doc_length_col_idx_;
+    scan_param_ = &scan_param;
     is_inited_ = true;
   }
   return ret;
@@ -1179,6 +1181,30 @@ int ObTextRetrievalBlockMaxIter::get_curr_block_max_info(const ObMaxScoreTuple *
 bool ObTextRetrievalBlockMaxIter::in_shallow_status() const
 {
   return in_shallow_status_;
+}
+
+int64_t ObTextRetrievalBlockMaxIter::get_term_hash() const 
+{
+  if (OB_ISNULL(scan_param_) || scan_param_->key_ranges_.empty()) {
+    return 0;
+  }
+  const common::ObNewRange &range = scan_param_->key_ranges_.at(0);
+  const common::ObObj *objs = range.start_key_.get_obj_ptr();
+  if (nullptr != objs && range.start_key_.get_obj_cnt() > 0) {
+    return objs[0].get_int(); 
+  }
+  return 0;
+}
+
+int64_t ObTextRetrievalBlockMaxIter::get_current_block_id() const 
+{
+  // 策略：使用当前 Block 的 "Min Domain ID" (即 Start DocID) 作为 Block ID
+  // 在 advance_shallow 成功后，curr_id_ 会被更新为 max_score_tuple_->min_domain_id_
+  // 这对于同一个 Block 是稳定的。
+  if (OB_ISNULL(curr_id_)) {
+    return -1;
+  }
+  return curr_id_->get_int();
 }
 
 int ObTextRetrievalBlockMaxIter::calc_dim_max_score(

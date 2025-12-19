@@ -2322,7 +2322,10 @@ int ObTscCgService::generate_text_ir_ctdef(const ObLogTableScan &op,
     LOG_WARN("invalid fulltext index table id", K(ret), KPC(match_against));
   } else if (OB_FAIL(ObDASTaskFactory::alloc_das_ctdef(DAS_OP_IR_SCAN, ctdef_alloc, ir_scan_ctdef))) {
     LOG_WARN("allocate ir scan ctdef failed", K(ret));
-  } else if (OB_UNLIKELY(!cg_ctx.is_func_lookup_ && !cg_ctx.is_es_match_ && ObTSCIRScanType::OB_IR_INV_IDX_SCAN != scan_ctdef.ir_scan_type_)) {
+  } else if (cg_ctx.is_merge_fts_index_) {
+    ir_scan_ctdef->fts_idx_ = cg_ctx.curr_merge_fts_idx_;
+  }
+  if (OB_UNLIKELY(!cg_ctx.is_func_lookup_ && !cg_ctx.is_es_match_ && ObTSCIRScanType::OB_IR_INV_IDX_SCAN != scan_ctdef.ir_scan_type_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected ir scan type for inverted index scan", K(ret), K(scan_ctdef));
   } else {
@@ -2468,7 +2471,7 @@ int ObTscCgService::generate_text_ir_ctdef(const ObLogTableScan &op,
     }
   }
 
-  if (OB_SUCC(ret) && tr_info.need_sort()) {
+  if (OB_SUCC(ret) && tr_info.need_sort() && !cg_ctx.is_merge_fts_index_) {
     ObSEArray<OrderItem, 2> order_items;
     if (OB_FAIL(order_items.push_back(tr_info.sort_key_))) {
       LOG_WARN("append order item array failed", K(ret));
@@ -2604,6 +2607,28 @@ int ObTscCgService::generate_index_merge_node_ctdef(const ObLogTableScan &op,
                 if (OB_FAIL(generate_text_ir_ctdef(op, cg_ctx, tsc_ctdef, *scan_ctdef, ir_scan_ctdef))) {
                   LOG_WARN("failed to generate text ir ctdef", K(ret));
                 } else {
+                  ObDASIRScanCtDef *ir_real_ctdef = static_cast<ObDASIRScanCtDef*>(ir_scan_ctdef);
+                  const IndexMergePath *path = nullptr;
+                  path = static_cast<const IndexMergePath*>(op.get_access_path());
+                  const ObIArray<ObRawExpr *> &pushed_filters = path->fts_pushed_filters_;
+                  if (path->fts_pushed_filters_.count() > 0) {
+                    ir_real_ctdef->scalar_filters_.set_allocator(&alloc);
+                    if (OB_FAIL(ir_real_ctdef->scalar_filters_.reserve(pushed_filters.count()))) {
+                      LOG_WARN("failed to reserve capacity for scalar filters", K(ret));
+                    }
+                    for (int64_t k = 0; OB_SUCC(ret) && k < pushed_filters.count(); ++k) {
+                      ObExpr *rt_expr = nullptr;
+                      ObRawExpr *raw_expr = pushed_filters.at(k);                              
+                      // 生成物理表达式
+                      if (OB_FAIL(cg_.generate_rt_expr(*raw_expr, rt_expr))) {
+                        LOG_WARN("failed to generate runtime expr", K(ret));
+                      } else if (OB_FAIL(cg_.mark_expr_self_produced(raw_expr))) {
+                        LOG_WARN("failed to mark expr self produced", K(ret));
+                      } else if (OB_FAIL(ir_real_ctdef->scalar_filters_.push_back(rt_expr))) {
+                        LOG_WARN("failed to push back rt expr", K(ret));
+                      }
+                    }
+                  }
                   child_ctdef = ir_scan_ctdef;
                 }
               } else {

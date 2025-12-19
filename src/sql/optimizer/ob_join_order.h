@@ -844,7 +844,10 @@ class Path
                    ObJoinOrder* parent)
       : AccessPath(table_id, ref_table_id, ref_table_id, parent, NULLS_FIRST_ASC),
         root_(NULL),
-        index_cnt_(0)
+        index_cnt_(0),
+        pushdown_limit_(-1),
+        has_ordering_by_score_(false),
+        fts_pushed_filters_()
     {}
 
     INHERIT_TO_STRING_KV("AccessPath", AccessPath, KPC_(root), K_(index_cnt));
@@ -857,6 +860,9 @@ class Path
   public:
     ObIndexMergeNode *root_;
     int64_t index_cnt_;
+    int64_t pushdown_limit_;
+    bool has_ordering_by_score_;
+    common::ObSEArray<ObRawExpr *, 2, common::ModulePageAllocator, true> fts_pushed_filters_;
 
   private:
     DISALLOW_COPY_AND_ASSIGN(IndexMergePath);

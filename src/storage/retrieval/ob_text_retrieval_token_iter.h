@@ -209,6 +209,8 @@ public:
   virtual int advance_shallow(const ObDatum &id_datum, const bool inclusive) override;
   virtual int get_curr_block_max_info(const ObMaxScoreTuple *&max_score_tuple) override;
   virtual bool in_shallow_status() const override;
+  virtual int64_t get_term_hash() const override;
+  virtual int64_t get_current_block_id() const override;
   // currently, for text retrieval, total_doc_cnt and token_doc_cnt is required before block max calculation
   int init_block_max_iter(const int64_t total_doc_cnt, const double avg_doc_token_cnt);
 private:
@@ -230,6 +232,7 @@ private:
   bool is_inited_;
   ObTableScanParam hash_only_param_;
   common::ObSEArray<common::ObNewRange, 1> hash_only_ranges_;
+  const ObTableScanParam *scan_param_;
   DISALLOW_COPY_AND_ASSIGN(ObTextRetrievalBlockMaxIter);
 };
 

@@ -45,7 +45,8 @@ ObSRBMWIterImpl::ObSRBMWIterImpl()
     enable_scalar_filter_(false),
     id_lower_bound_(0),
     id_upper_bound_(-1),
-    enable_id_range_filter_(false)
+    enable_id_range_filter_(false),
+    sorted_output_idx_(0)
 {}
 
 int ObSRBMWIterImpl::init(
@@ -783,6 +784,7 @@ int ObSRBMWIterImpl::try_generate_next_range_from_merge_heap(
 int ObSRBMWIterImpl::project_rows_from_top_k_heap(const int64_t capacity, int64_t &count)
 {
   int ret = OB_SUCCESS;
+  count = 0;
   if (OB_UNLIKELY(BMWStatus::FINISHED != status_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected status", K(ret), K_(status));
@@ -792,6 +794,28 @@ int ObSRBMWIterImpl::project_rows_from_top_k_heap(const int64_t capacity, int64_
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(ret), K(capacity), K(buffered_domain_ids_.count()));
   } else {
+    if (sorted_output_cache_.empty() && !top_k_heap_.empty()) {
+      // prepare sorted output cache
+      while (OB_SUCC(ret) && !top_k_heap_.empty()) {
+        const TopKItem &top_k_item = top_k_heap_.top();
+        if (OB_FAIL(sorted_output_cache_.push_back(top_k_item))) {
+          LOG_WARN("failed to push back top k item to sorted output cache", K(ret));
+        } else if (OB_FAIL(top_k_heap_.pop())) {
+          LOG_WARN("failed to pop top k heap", K(ret));
+        }
+      }
+      if (OB_SUCC(ret)) {
+        std::sort(sorted_output_cache_.begin(), sorted_output_cache_.end(),
+          [&](const TopKItem &a, const TopKItem &b) {
+            // 通过 cache_idx_ 去 id_cache_ 拿到真实的 DocID 进行比较
+            const ObDocIdExt &id_a = id_cache_.at(a.cache_idx_);
+            const ObDocIdExt &id_b = id_cache_.at(b.cache_idx_);
+            // 必须是小于号 (<)，确保升序
+            return id_a.get_datum().get_int() < id_b.get_datum().get_int();
+          });
+      }
+      sorted_output_idx_ = 0;
+    }
     ObExpr *relevance_proj_expr = iter_param_->relevance_proj_expr_;
     ObExpr *id_proj_expr = iter_param_->id_proj_expr_;
     ObEvalCtx *eval_ctx = iter_param_->eval_ctx_;
@@ -805,25 +829,44 @@ int ObSRBMWIterImpl::project_rows_from_top_k_heap(const int64_t capacity, int64_
     }
 
     ObEvalCtx::BatchInfoScopeGuard guard(*eval_ctx);
-    count = 0;
-    for (int64_t i = 0; OB_SUCC(ret) && i < capacity && !top_k_heap_.empty(); ++i) {
-      guard.set_batch_idx(i);
-      const TopKItem &top_k_item = top_k_heap_.top();
+    while (OB_SUCC(ret) && sorted_output_idx_ < sorted_output_cache_.count() && count < capacity) {
+      guard.set_batch_idx(count);
+      const TopKItem &top_k_item = sorted_output_cache_.at(sorted_output_idx_);
       const ObDocIdExt &id = id_cache_.at(top_k_item.cache_idx_);
-      set_datum_func_(id_datums[i], id);
-      id_evaluated_flags.set(i);
+      set_datum_func_(id_datums[count], id);
+      id_evaluated_flags.set(count);
       id_proj_expr->set_evaluated_projected(*eval_ctx);
 
       if (iter_param_->need_project_relevance()) {
-        relevance_datums[i].set_double(top_k_item.relevance_);
-        relevance_evaluated_flags->set(i);
+        relevance_datums[count].set_double(top_k_item.relevance_);
+        relevance_evaluated_flags->set(count);
         relevance_proj_expr->set_evaluated_projected(*eval_ctx);
       }
       ++count;
-      if (OB_FAIL(top_k_heap_.pop())) {
-        LOG_WARN("failed to pop top k heap", K(ret));
-      }
+      ++sorted_output_idx_;
     }
+    if (OB_SUCC(ret) && count == 0) {
+      ret = OB_ITER_END;
+    }
+    // count = 0;
+    // for (int64_t i = 0; OB_SUCC(ret) && i < capacity && !top_k_heap_.empty(); ++i) {
+    //   guard.set_batch_idx(i);
+    //   const TopKItem &top_k_item = top_k_heap_.top();
+    //   const ObDocIdExt &id = id_cache_.at(top_k_item.cache_idx_);
+    //   set_datum_func_(id_datums[i], id);
+    //   id_evaluated_flags.set(i);
+    //   id_proj_expr->set_evaluated_projected(*eval_ctx);
+
+    //   if (iter_param_->need_project_relevance()) {
+    //     relevance_datums[i].set_double(top_k_item.relevance_);
+    //     relevance_evaluated_flags->set(i);
+    //     relevance_proj_expr->set_evaluated_projected(*eval_ctx);
+    //   }
+    //   ++count;
+    //   if (OB_FAIL(top_k_heap_.pop())) {
+    //     LOG_WARN("failed to pop top k heap", K(ret));
+    //   }
+    // }
   }
   return ret;
 }

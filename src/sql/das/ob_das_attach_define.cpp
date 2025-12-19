@@ -98,7 +98,7 @@ OB_SERIALIZE_MEMBER((ObDASDomainIdMergeCtDef, ObDASAttachCtDef), domain_types_);
 
 OB_SERIALIZE_MEMBER((ObDASDomainIdMergeRtDef, ObDASAttachRtDef));
 
-OB_SERIALIZE_MEMBER((ObDASIndexMergeCtDef, ObDASAttachCtDef), merge_type_, is_reverse_, merge_node_types_, rowkey_exprs_); // FARM COMPAT WHITELIST
+OB_SERIALIZE_MEMBER((ObDASIndexMergeCtDef, ObDASAttachCtDef), merge_type_, is_reverse_, merge_node_types_, rowkey_exprs_, limit_); // FARM COMPAT WHITELIST
 
 OB_SERIALIZE_MEMBER((ObDASIndexMergeRtDef, ObDASAttachRtDef));
 

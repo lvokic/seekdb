@@ -299,6 +299,7 @@ public:
     return idx_data_header_->ps_node_array_ + cur_node_index_;
   }
   INHERIT_TO_STRING_KV("base iterator:", ObRAWIndexBlockRowIterator, "format:", "ObTFMIndexBlockRowIterator", KPC(idx_data_header_));
+  void set_int64_fast_path(bool enable);
 
 private:
   int get_cur_row_id_range(const ObCSRange &parent_row_range,
@@ -319,6 +320,8 @@ private:
 private:
   const ObIndexBlockDataHeader *idx_data_header_;
   int64_t cur_node_index_;
+  bool is_int64_fast_path_;
+  const int64_t *int64_col_data_;
 };
 
 class ObIndexBlockRowScanner
@@ -386,6 +389,7 @@ public:
   int get_end_key(ObCommonDatumRowkey &endkey) const;
   OB_INLINE bool is_valid() const { return is_inited_; }
   OB_INLINE bool is_ddl_merge_scan() const { return index_format_ == ObIndexFormat::DDL_MERGE; }
+  OB_INLINE int64_t get_current_block_start_index() const { return curr_rowkey_begin_idx_; }
   void switch_context(const ObSSTable &sstable,
                       const ObTablet *tablet,
                       const ObStorageDatumUtils &datum_utils,
@@ -397,6 +401,7 @@ public:
                K_(is_normal_cg), K_(parent_row_range), K_(filter_constant_type), K_(is_normal_query),
                K_(iter_param), KP_(table_read_info));
 private:
+  void check_is_fts_fast_path();
   int init_by_micro_data(const ObMicroBlockData &idx_block_data);
   int locate_key(const ObDatumRowkey &rowkey);
   int init_datum_row();
@@ -440,6 +445,7 @@ private:
   sql::ObBoolMaskType filter_constant_type_;
   ObIndexBlockIterParam iter_param_; // todo qilu: refactor this after refactor ddl_kv_mgr
   const ObITableReadInfo *table_read_info_;
+  bool is_fts_int64_fast_path_;
 };
 
 } // namespace blocksstable

@@ -3746,7 +3746,7 @@ if (OB_ISNULL(ctdef) || OB_ISNULL(rtdef) || ctdef->op_type_ != DAS_OP_INDEX_MERG
 
     if (OB_SUCC(ret)) {
       ObDASIndexMergeIterParam merge_param;
-      ObDASIndexMergeIter *merge_iter = nullptr;
+      ObDASIndexMergeAndIter *merge_iter = nullptr;
       merge_param.max_size_ = merge_rtdef->eval_ctx_->is_vectorized() ?
           merge_rtdef->eval_ctx_->max_batch_size_ : 1;
       merge_param.eval_ctx_ = merge_rtdef->eval_ctx_;

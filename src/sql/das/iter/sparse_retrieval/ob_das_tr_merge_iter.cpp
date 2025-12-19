@@ -108,7 +108,8 @@ int ObDASTRMergeIter::inner_init(ObDASIterParam &param)
       }
     }
     sr_iter_param_.max_batch_size_ = merge_param.max_batch_size_; // may be greater than ir_rtdef_->eval_ctx_->max_batch_size_
-    
+    sr_iter_param_.table_id_ = ir_ctdef_->get_inv_idx_scan_ctdef()->ref_table_id_;
+    sr_iter_param_.tablet_id_ = inv_idx_tablet_id_;
     sr_iter_param_.id_lower_bound_ = merge_param.id_lower_bound_;
     sr_iter_param_.id_upper_bound_ = merge_param.id_upper_bound_;
     

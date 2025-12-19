@@ -83,6 +83,7 @@ ob_set_subtarget(ob_share ALONE
   ob_mview_args.cpp
   ob_lonely_table_clean_rpc_struct.cpp
   ob_token_df_cache.cpp
+  ob_fts_block_cache.cpp
 )
 
 file(GLOB SCHEMA_CPPS "inner_table/ob_inner_table_schema.*.cpp")

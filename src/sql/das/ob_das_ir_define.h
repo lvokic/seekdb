@@ -88,7 +88,8 @@ public:
       flags_(0),
       field_boost_expr_(nullptr),
       scalar_filters_(alloc),
-      scalar_index_ctdef_(nullptr) {} // [FIX] Initialized
+      scalar_index_ctdef_(nullptr),
+      fts_idx_(OB_INVALID_INDEX) {} // [FIX] Initialized
       
   bool need_calc_relevance() const { return nullptr != relevance_expr_; }
   bool need_proj_relevance_score() const { return nullptr != relevance_proj_col_; }
@@ -217,6 +218,7 @@ public:
   ObExpr *field_boost_expr_;
   ExprFixedArray scalar_filters_;
   ObDASScanCtDef *scalar_index_ctdef_;
+  int64_t fts_idx_;
 };
 
 struct ObDASIRScanRtDef : ObDASAttachRtDef

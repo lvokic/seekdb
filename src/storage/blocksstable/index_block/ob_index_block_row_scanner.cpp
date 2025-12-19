@@ -784,9 +784,10 @@ int ObRAWIndexBlockRowIterator::get_index_row_count(const ObDatumRange &range,
 /******************             ObTFMIndexBlockRowIterator              **********************/
 ObTFMIndexBlockRowIterator::ObTFMIndexBlockRowIterator()
   : idx_data_header_(nullptr),
-    cur_node_index_(0)
+    cur_node_index_(0),
+    is_int64_fast_path_(false),
+    int64_col_data_(nullptr)
 {
-
 }
 
 ObTFMIndexBlockRowIterator::~ObTFMIndexBlockRowIterator()
@@ -799,6 +800,8 @@ void ObTFMIndexBlockRowIterator::reset()
   ObRAWIndexBlockRowIterator::reset();
   idx_data_header_ = nullptr;
   cur_node_index_ = 0;
+  is_int64_fast_path_ = false;
+  int64_col_data_ = nullptr;
 }
 
 void ObTFMIndexBlockRowIterator::reuse()
@@ -888,6 +891,63 @@ int ObTFMIndexBlockRowIterator::locate_range(const ObDatumRange &range,
     end_ = end_idx;
     current_ = is_reverse_scan_ ? end_idx : begin_idx;
   }
+  return ret;
+}
+
+static int fast_locate_range_int64(
+    const int64_t *data_ptr,
+    const int64_t row_cnt,
+    const ObDatumRange &range,
+    const bool is_left_border,
+    const bool is_right_border,
+    int64_t &begin_idx,
+    int64_t &end_idx)
+{
+  int ret = OB_SUCCESS;
+  // 1. 获取查询范围的 Int64 值
+  // 注意：这里假设 range 已经校验过并且是简单的单列 int64 查询
+  const int64_t min_val = range.get_start_key().get_datum(2).get_uint64();
+  const int64_t max_val = range.get_end_key().get_datum(2).get_uint64();
+
+  // 2. 快速确定 Lower Bound (begin_idx)
+  // 如果是全表扫描或最小值极小，直接从0开始
+  if (range.get_start_key().is_min_rowkey()) {
+    begin_idx = 0;
+  } else {
+    // 标准二分查找 (std::lower_bound logic)
+    // 优化：针对 advance_to 场景，可以使用 Galloping Search，这里先给标准二分
+    // 因为去掉了通用比较器开销，即使标准二分也足够快 (Compiler Auto-vectorization friendly)
+    const int64_t *ptr = std::lower_bound(data_ptr, data_ptr + row_cnt, min_val);
+    begin_idx = ptr - data_ptr;
+    // 处理开闭区间 (Border Flags)
+    // OceanBase Range 默认是 [start, end) 左闭右开，具体看 border flag
+    if (begin_idx < row_cnt && !range.get_border_flag().inclusive_start()) {
+        if (data_ptr[begin_idx] == min_val) {
+            begin_idx++;
+        }
+    }
+  }
+  // 3. 快速确定 Upper Bound (end_idx)
+  if (range.get_end_key().is_max_rowkey()) {
+    end_idx = row_cnt - 1;
+  } else {
+    // 从 begin_idx 开始找，利用局部性
+    const int64_t *ptr = std::upper_bound(data_ptr + begin_idx, data_ptr + row_cnt, max_val);
+    end_idx = (ptr - data_ptr) - 1;
+    // 处理开闭区间
+    if (end_idx >= 0 && !range.get_border_flag().inclusive_end()) {
+        if (data_ptr[end_idx] == max_val) {
+            end_idx--;
+        }
+    }
+  }
+  // 4. 边界修正
+  if (begin_idx > end_idx) {
+    begin_idx = ObIMicroBlockReaderInfo::INVALID_ROW_INDEX;
+    end_idx = ObIMicroBlockReaderInfo::INVALID_ROW_INDEX;
+    ret = OB_BEYOND_THE_RANGE;
+  }
+  
   return ret;
 }
 
@@ -1077,6 +1137,23 @@ int ObTFMIndexBlockRowIterator::get_end_key(ObCommonDatumRowkey &endkey)
   return ret;
 }
 
+void ObTFMIndexBlockRowIterator::set_int64_fast_path(bool enable) 
+{ 
+  is_int64_fast_path_ = enable;
+  int64_col_data_ = nullptr; // 先置空
+  if (enable && OB_NOT_NULL(idx_data_header_) && OB_NOT_NULL(idx_data_header_->rowkey_vector_)) {
+    // 假设倒排索引 Schema 为 (Hash, Token, DocID)，我们加速最后一列 DocID
+    // col_cnt_ 通常是 3，所以 index 为 2
+    const int64_t doc_id_col_idx = idx_data_header_->col_cnt_ - 1;         
+    // [调用新增接口]
+    int64_col_data_ = idx_data_header_->rowkey_vector_->get_int64_column_data(doc_id_col_idx);        
+    // 如果获取失败（比如该列因为由 NULL 导致没存成 Integer Vector），则回退
+    if (OB_ISNULL(int64_col_data_)) {
+      is_int64_fast_path_ = false; // 强制关闭 Fast Path
+    }
+  }
+}
+
 int ObTFMIndexBlockRowIterator::get_cur_row_id_range(const ObCSRange &parent_row_range,
                                                      ObCSRange &cs_range)
 {
@@ -1208,7 +1285,23 @@ int ObTFMIndexBlockRowIterator::locate_range_by_rowkey_vector(
     int64_t &end_idx)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(idx_data_header_->rowkey_vector_->locate_range(range,
+
+  if (is_int64_fast_path_) {
+    // === Fast Path (int64 direct comparison) ===
+    ret = fast_locate_range_int64(
+        int64_col_data_,
+        idx_data_header_->row_cnt_,
+        range,
+        is_left_border,
+        is_right_border,
+        begin_idx,
+        end_idx
+    );
+    // 处理 BEYOND_THE_RANGE (即没找到) 的情况，对于 locate_range 来说通常不是错误
+    if (OB_UNLIKELY(OB_BEYOND_THE_RANGE != ret && OB_SUCCESS != ret)) {
+       LOG_WARN("Fast locate range failed", K(ret));
+    }
+  } else if (OB_FAIL(idx_data_header_->rowkey_vector_->locate_range(range,
                                                              is_left_border,
                                                              is_right_border,
                                                              is_normal_cg,
@@ -1230,7 +1323,7 @@ ObIndexBlockRowScanner::ObIndexBlockRowScanner()
     index_format_(ObIndexFormat::INVALID), parent_row_range_(), is_get_(false), is_reverse_scan_(false),
     is_left_border_(false), is_right_border_(false), is_inited_(false),
     is_normal_cg_(false), is_normal_query_(true), filter_constant_type_(sql::ObBoolMaskType::PROBABILISTIC),
-    iter_param_(), table_read_info_(nullptr)
+    iter_param_(), table_read_info_(nullptr), is_fts_int64_fast_path_(false)
 {}
 
 ObIndexBlockRowScanner::~ObIndexBlockRowScanner()
@@ -1320,6 +1413,7 @@ void ObIndexBlockRowScanner::reset()
   allocator_ = nullptr;
   filter_constant_type_ = sql::ObBoolMaskType::PROBABILISTIC;
   table_read_info_ = nullptr;
+  is_fts_int64_fast_path_ = false;
 }
 
 int ObIndexBlockRowScanner::init(
@@ -1346,6 +1440,7 @@ int ObIndexBlockRowScanner::init(
     is_normal_query_ = !query_flag.is_daily_merge() && !query_flag.is_multi_version_minor_merge();
     table_read_info_ = table_read_info;
     is_inited_ = true;
+    check_is_fts_fast_path();
   }
   return ret;
 }
@@ -1650,6 +1745,28 @@ int ObIndexBlockRowScanner::check_blockscan(
   return ret;
 }
 
+void ObIndexBlockRowScanner::check_is_fts_fast_path()
+{
+  is_fts_int64_fast_path_ = false; // 默认重置为 false
+  
+  if (nullptr != table_read_info_) {
+    // 1. 检查是否为倒排索引表 (Schema Check)
+    // FTS 倒排表特征：RowKey 列数为 3: (Hash [UInt64], Token [Varchar], DocID [Int64/UInt64])
+    // 我们的 Fast Path 优化目标是最后一列 (DocID) 的比较
+    if (table_read_info_->get_rowkey_count() == 3) {
+      const common::ObIArray<share::schema::ObColumnParam *> *cols = table_read_info_->get_columns();
+      if (OB_NOT_NULL(cols) && cols->count() > 0) {
+        // 这里做一个较弱的检查：只要第一列是 UInt64 (Hash)，我们就认为它是 FTS 索引
+        // 实际上 Fast Path 内部还会检查最后一列是否有数据指针，所以这里宽松一点没问题
+        const share::schema::ObColumnParam *col_param = cols->at(0);
+        if (nullptr != col_param && col_param->get_meta_type().get_type() == ObUInt64Type) {
+          is_fts_int64_fast_path_ = true;
+        }
+      }
+    }
+  }
+}
+
 int ObIndexBlockRowScanner::init_by_micro_data(const ObMicroBlockData &idx_block_data)
 {
   int ret = OB_SUCCESS;
@@ -1737,6 +1854,10 @@ int ObIndexBlockRowScanner::init_by_micro_data(const ObMicroBlockData &idx_block
       LOG_WARN("iter is null", K(index_format_), K(ret));
     } else if (OB_FAIL(iter_->init(idx_block_data, datum_utils_, allocator_, is_reverse_scan_, iter_param_))) {
       LOG_WARN("fail to init iter", K(ret), K(idx_block_data), KPC(iter_));
+    } else {
+      if (index_format_ == ObIndexFormat::TRANSFORMED && nullptr != transformed_iter_) {
+        transformed_iter_->set_int64_fast_path(is_fts_int64_fast_path_);        
+      }
     }
   }
   return ret;
@@ -1813,6 +1934,7 @@ void ObIndexBlockRowScanner::switch_context(const ObSSTable &sstable,
   table_read_info_ = table_read_info;
   iter_param_.sstable_ = &sstable;
   iter_param_.tablet_ = tablet;
+  check_is_fts_fast_path();
   int ret = OB_SUCCESS;
   if (OB_NOT_NULL(iter_)) {
     ObStorageDatumUtils *switch_datum_utils = const_cast<ObStorageDatumUtils *>(datum_utils_);

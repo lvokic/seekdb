@@ -757,6 +757,7 @@ public:
   inline common::ObIArray<bool> &get_filter_before_index_flags() { return filter_before_index_back_; }
   inline const common::ObIArray<bool> &get_filter_before_index_flags() const { return filter_before_index_back_; }
   inline const ObRawExpr *get_limit_expr() const { return limit_count_expr_; }
+  inline const ObRawExpr *get_offset_expr() const { return limit_offset_expr_; }
   inline ObRawExpr *get_limit_expr() { return limit_count_expr_; }
   inline ObRawExpr *get_offset_expr() { return limit_offset_expr_; }
   int set_limit_offset(ObRawExpr *limit, ObRawExpr *offset);

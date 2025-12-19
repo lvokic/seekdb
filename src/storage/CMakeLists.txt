@@ -1054,7 +1054,6 @@ ob_set_subtarget(ob_storage retrieval
   retrieval/ob_block_stat_iter.cpp
   retrieval/ob_inv_idx_param_estimator.cpp
   retrieval/ob_scalar_filter_candidate_set.cpp
-  retrieval/ob_sparse_bmw_iter.cpp
   retrieval/ob_sparse_daat_iter.cpp
   retrieval/ob_sparse_taat_iter.cpp
   retrieval/ob_sparse_lookup_iter.cpp
@@ -1083,6 +1082,7 @@ ob_set_subtarget(ob_storage_simd common
   blocksstable/encoding/ob_dict_decoder_simd.cpp
   blocksstable/cs_encoding/ob_dict_column_decoder_simd.cpp
   retrieval/ob_sparse_utils.cpp
+  retrieval/ob_sparse_bmw_iter.cpp
 )
 
 ob_server_add_target(ob_storage_simd)

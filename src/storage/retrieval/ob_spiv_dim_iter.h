@@ -184,6 +184,8 @@ public:
   virtual int advance_shallow(const ObDatum &id_datum, const bool inclusive) override;
   virtual int get_curr_block_max_info(const ObMaxScoreTuple *&max_score_tuple) override;
   virtual bool in_shallow_status() const override;
+  virtual int64_t get_term_hash() const override { return -1; }
+  virtual int64_t get_current_block_id() const override { return -1; }
   // currently, for text retrieval, total_doc_cnt and token_doc_cnt is required before block max calculation
   int init_block_max_iter();
 

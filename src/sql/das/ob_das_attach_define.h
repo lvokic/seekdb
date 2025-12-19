@@ -212,7 +212,8 @@ public:
       merge_type_(INDEX_MERGE_INVALID),
       is_reverse_(false),
       merge_node_types_(alloc),
-      rowkey_exprs_(alloc)
+      rowkey_exprs_(alloc),
+      limit_(-1)
   {}
 
   virtual ~ObDASIndexMergeCtDef() {}
@@ -222,6 +223,7 @@ public:
   /* child node types, include NODE_MERGE, NODE_SCAN, NDOE_FTS now */
   ObFixedArray<ObIndexMergeType, common::ObIAllocator> merge_node_types_;
   sql::ExprFixedArray rowkey_exprs_;  // merge by rowkey
+  int64_t limit_;
 };
 
 struct ObDASIndexMergeRtDef : ObDASAttachRtDef

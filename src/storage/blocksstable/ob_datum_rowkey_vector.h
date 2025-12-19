@@ -200,6 +200,19 @@ public:
   {
     return last_rowkey_;
   }
+  OB_INLINE const int64_t *get_int64_column_data(const int64_t col_idx) const
+  {
+    const int64_t *data_ptr = nullptr;
+    if (OB_LIKELY(col_idx >= 0 && col_idx < col_cnt_)) {
+      const ObColumnVector &col = columns_[col_idx];
+      if (ObColumnVectorType::SIGNED_INTEGER_TYPE == col.type_) {
+        data_ptr = col.signed_ints_;
+      } else if (ObColumnVectorType::UNSIGNED_INTEGER_TYPE == col.type_) {
+        data_ptr = reinterpret_cast<const int64_t *>(col.unsigned_ints_);
+      }
+    }
+    return data_ptr;
+  }
   int deep_copy(
       char *buf,
       int64_t &pos,

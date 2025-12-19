@@ -8198,6 +8198,65 @@ int ObLogPlan::try_push_limit_into_table_scan(ObLogicalOperator *top,
         LOG_WARN("failed to construct startup filter", KPC(limit_expr));
       } else {
         is_pushed = true;
+        if (table_scan->use_index_merge()) {
+          ObIArray<ObTextRetrievalInfo> &merge_tr_infos = table_scan->get_merge_tr_infos();
+          
+          // 1. 获取全局 ORDER BY 信息 (用于激活 BMW)
+          const ObSelectStmt *select_stmt = static_cast<const ObSelectStmt*>(get_stmt());
+          OrderItem sort_key;
+          bool has_sort_key = false;
+          // 检查是否存在 Order By 且排序项与全文检索相关
+          // (这里简化判断，默认取第一个排序项，实际应校验列匹配)
+          if (NULL != select_stmt && select_stmt->has_order_by() && select_stmt->get_order_items().count() > 0) {
+              sort_key = select_stmt->get_order_items().at(0);
+              has_sort_key = true;
+          }
+
+          // 2. 提取需要下推的谓词 (Predicates) (用于 Range Pruning)
+          // 从 TableScan 的过滤条件中，剔除掉 MATCH(...) 本身，剩下的就是 id < 1000 这种
+          ObSEArray<ObRawExpr *, 4> push_filters;
+          const ObIArray<ObRawExpr *> &scan_filters = table_scan->get_filter_exprs();
+          for (int64_t i = 0; OB_SUCC(ret) && i < scan_filters.count(); ++i) {
+              ObRawExpr *expr = scan_filters.at(i);
+              if (OB_NOT_NULL(expr) && !expr->has_flag(CNT_MATCH_EXPR)) {
+                  if (OB_FAIL(push_filters.push_back(expr))) {
+                      LOG_WARN("failed to push back filter", K(ret));
+                  }
+              }
+          }
+
+          // 3. 将收集到的信息注入到 FTS 节点的 tr_info 中
+          if (OB_SUCC(ret)) {
+              for (int64_t i = 0; OB_SUCC(ret) && i < merge_tr_infos.count(); ++i) {
+                  ObTextRetrievalInfo &tr_info = merge_tr_infos.at(i);
+                  
+                  // 识别 FTS 节点 (关联了倒排索引的节点)
+                  if (tr_info.inv_idx_tid_ != OB_INVALID_ID) {
+                      
+                      // [Action A] 下推 Limit (Top-K 截断)
+                      tr_info.topk_limit_expr_ = new_limit_expr;
+                      tr_info.topk_offset_expr_ = new_offset_expr;
+                      
+                      // [Action B] 下推 Sort Key (BMW 算法的必要条件)
+                      if (has_sort_key) {
+                          tr_info.sort_key_ = sort_key;
+                      }
+
+                      // [Action C] 下推 Predicates (核心：让 FTS 知道 id < 1000)
+                      if (push_filters.count() > 0) {
+                          // 注意：ObTextRetrievalInfo 结构体中必须有 scalar_filters_ 成员
+                          // 如果没有，请确保在结构体定义中添加了它
+                          if (OB_FAIL(tr_info.scalar_filters_.assign(push_filters))) {
+                              LOG_WARN("failed to assign scalar filters", K(ret));
+                          }
+                      }
+                      
+                      LOG_TRACE("OPT: [Plan Rewrite] Full Context Pushed to FTS", 
+                                K(i), KPC(new_limit_expr), K(sort_key), K(push_filters));
+                  }
+              }
+            }
+          }
       }
       if (das_multi_partition) {
         is_pushed = false;
@@ -15600,7 +15659,7 @@ int ObLogPlan::try_push_topn_into_domain_scan(ObLogicalOperator *&top,
                                                     need_further_sort))) {
       LOG_WARN("failed to push topn into vector index scan", K(ret));
     }
-  } else if (table_scan->is_text_retrieval_scan()) {
+  } else if (table_scan->is_text_retrieval_scan() || table_scan->use_index_merge()) {
     if (OB_FAIL(try_push_topn_into_text_retrieval_scan(top,
                                                       topn_expr,
                                                       get_stmt()->get_limit_expr(),
@@ -15694,28 +15753,67 @@ int ObLogPlan::try_push_topn_into_text_retrieval_scan(ObLogicalOperator *&top,
   } else if (log_op_def::LOG_TABLE_SCAN != top->get_type()) {
     // do nothing
   } else if (OB_FALSE_IT(table_scan = static_cast<ObLogTableScan*>(top))) {
-  } else if (!table_scan->is_text_retrieval_scan() || table_scan->use_index_merge()) {
+  } else if (!table_scan->is_text_retrieval_scan() && !table_scan->use_index_merge()) {
     // do nothing
-  } else if ((table_scan->get_filter_exprs().count() != 0 && table_scan->get_doc_id_filters().count() == 0) ||
-              table_scan->get_pushdown_filter_exprs().count() != 0) {
+  } else if (!table_scan->use_index_merge() &&
+            ((table_scan->get_filter_exprs().count() != 0 && table_scan->get_doc_id_filters().count() == 0) ||
+              table_scan->get_pushdown_filter_exprs().count() != 0)) {
     // do nothing, topn pushdown requires that only match filter exists on the base table.
-  } else if (sort_keys.count() >= 1 && OB_NOT_NULL(sort_keys.at(0).expr_) &&
-             sort_keys.at(0).expr_ == table_scan->get_text_retrieval_info().match_expr_) {
+  } else if (sort_keys.count() >= 1 && OB_NOT_NULL(sort_keys.at(0).expr_)) {
     // only accept match expr as prefix sort key.
-    has_multi_sort_keys = sort_keys.count() == 1 ? false : true;
-    need_further_sort = has_multi_sort_keys || table_scan->use_das() || need_exchange;
-    pushed_limit_expr = need_further_sort ? topn_expr : limit_expr;
-    pushed_offset_expr = need_further_sort ? NULL : offset_expr;
-    ObSEArray<OrderItem, 1> tmp_sort_keys;
-    table_scan->get_text_retrieval_info().topk_limit_expr_ = pushed_limit_expr;
-    table_scan->get_text_retrieval_info().topk_offset_expr_ = pushed_offset_expr;
-    table_scan->get_text_retrieval_info().sort_key_.expr_ = sort_keys.at(0).expr_;
-    table_scan->get_text_retrieval_info().sort_key_.order_type_ = sort_keys.at(0).order_type_;
-    table_scan->get_text_retrieval_info().with_ties_ = (has_multi_sort_keys || is_fetch_with_ties);
-    if (OB_FAIL(tmp_sort_keys.push_back(sort_keys.at(0)))) {
-      LOG_WARN("failed to push back order item", K(ret));
-    } else if (OB_FAIL(table_scan->set_op_ordering(tmp_sort_keys))) {
-      LOG_WARN("failed to set op ordering", K(ret));
+    bool match_found = false;
+    ObTextRetrievalInfo *target_tr_info = nullptr;
+    if (table_scan->use_index_merge()) {
+      ObIArray<ObTextRetrievalInfo> &merge_tr_infos = table_scan->get_merge_tr_infos();
+      for (int64_t i = 0; i < merge_tr_infos.count(); ++i) {
+        if (sort_keys.at(0).expr_ == merge_tr_infos.at(i).match_expr_) {
+          match_found = true;
+          target_tr_info = &merge_tr_infos.at(i);
+          break;
+        }
+      }
+    } else {
+      // 单表 FTS 场景
+      if (sort_keys.at(0).expr_ == table_scan->get_text_retrieval_info().match_expr_) {
+        match_found = true;
+        target_tr_info = &table_scan->get_text_retrieval_info();
+      }
+    }
+    if (match_found && OB_NOT_NULL(target_tr_info)) {
+      has_multi_sort_keys = sort_keys.count() == 1 ? false : true;
+      need_further_sort = has_multi_sort_keys || table_scan->use_das() || need_exchange;
+      pushed_limit_expr = need_further_sort ? topn_expr : limit_expr;
+      pushed_offset_expr = need_further_sort ? NULL : offset_expr;
+
+      target_tr_info->topk_limit_expr_ = pushed_limit_expr;
+      target_tr_info->topk_offset_expr_ = pushed_offset_expr;
+      target_tr_info->sort_key_.expr_ = sort_keys.at(0).expr_;
+      target_tr_info->sort_key_.order_type_ = sort_keys.at(0).order_type_;
+      target_tr_info->with_ties_ = (has_multi_sort_keys || is_fetch_with_ties);
+
+      ObSEArray<ObRawExpr *, 4> push_filters;
+      const ObIArray<ObRawExpr *> &scan_filters = table_scan->get_filter_exprs();
+      for (int64_t i = 0; OB_SUCC(ret) && i < scan_filters.count(); ++i) {
+        ObRawExpr *expr = scan_filters.at(i);
+        if (OB_NOT_NULL(expr) && !expr->has_flag(CNT_MATCH_EXPR)) {
+          if (OB_FAIL(push_filters.push_back(expr))) {
+            LOG_WARN("failed to push back filter", K(ret));
+          }
+        }
+      }
+      if (OB_SUCC(ret) && push_filters.count() > 0) {
+        if (OB_FAIL(target_tr_info->scalar_filters_.assign(push_filters))) {
+          LOG_WARN("failed to assign scalar filters", K(ret));
+        }
+      }
+      if (OB_SUCC(ret)) {
+        ObSEArray<OrderItem, 1> tmp_sort_keys;
+        if (OB_FAIL(tmp_sort_keys.push_back(sort_keys.at(0)))) {
+          LOG_WARN("failed to push back order item", K(ret));
+        } else if (OB_FAIL(table_scan->set_op_ordering(tmp_sort_keys))) {
+          LOG_WARN("failed to set op ordering", K(ret));
+        }
+      }
     }
   }
   return ret;

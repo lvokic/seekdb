@@ -3410,15 +3410,23 @@ int ObJoinOrder::generate_candi_index_merge_trees(const uint64_t ref_table_id,
   if (valid_index_ids.empty()) {
     // do nothing
   } else {
+    ObIndexMergeNode *intersect_root = NULL;
+    if (OB_ISNULL(intersect_root = OB_NEWx(ObIndexMergeNode, allocator_))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("failed to allocate intersect root node", K(ret));
+    } else {
+      intersect_root->node_type_ = INDEX_MERGE_INTERSECT;
+    }
     for (int64_t i = 0; OB_SUCC(ret) && i < filters.count(); ++i) {
       ObRawExpr *filter = filters.at(i);
       ObIndexMergeNode *candi_node = NULL;
       bool is_valid = false;
+      if (filter->get_expr_type() == T_OP_IN) {
+        continue;
+      }
       if (OB_ISNULL(filter)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("get unexpected null filter", K(ret), K(i));
-      } else if (filter->get_expr_type() != T_OP_OR) {
-        // do nothing, only support UNION MERGE now
       } else if (OB_FAIL(generate_candi_index_merge_node(ref_table_id,
                                                          filter,
                                                          valid_index_ids,
@@ -3426,12 +3434,21 @@ int ObJoinOrder::generate_candi_index_merge_trees(const uint64_t ref_table_id,
                                                          candi_node,
                                                          is_valid))) {
         LOG_WARN("failed to generate one index merge tree for filter", K(ret), KPC(filter));
-      } else if (!is_valid || NULL == candi_node) {
+      } else if (is_valid && OB_NOT_NULL(candi_node)) {
         // do nothing
-      } else if (OB_FAIL(candi_node->formalize_index_merge_tree())) {
-        LOG_WARN("failed to formalize candi index merge tree", K(ret), KPC(candi_node));
-      } else if (OB_FAIL(candi_index_trees.push_back(candi_node))) {
-        LOG_WARN("failed to push back candi index tree", K(ret));
+        if (OB_FAIL(intersect_root->children_.push_back(candi_node))) {
+          LOG_WARN("failed to push back child to intersect root", K(ret));
+        }
+      }  
+      if (OB_SUCC(ret)) {
+        if (intersect_root->children_.count() > 0) {
+          if (OB_FAIL(intersect_root->formalize_index_merge_tree())) {
+            LOG_WARN("failed to formalize intersect root", K(ret));
+          } else if (OB_FAIL(candi_index_trees.push_back(intersect_root))) {
+            LOG_WARN("failed to push back intersect root", K(ret));
+          }
+        } else {
+        }
       }
     }
   }
@@ -3458,7 +3475,7 @@ int ObJoinOrder::generate_candi_index_merge_node(const uint64_t ref_table_id,
       LOG_WARN("failed to allocate index merge node", K(ret));
     } else {
       candi_node->node_type_ = (T_OP_OR == filter->get_expr_type()) ? INDEX_MERGE_UNION : INDEX_MERGE_INTERSECT;
-      is_valid_node = (T_OP_OR == filter->get_expr_type()) ? true : false;
+      is_valid_node = true;
     }
     for (int64_t i = 0; OB_SUCC(ret) && i < filter->get_param_count(); ++i) {
       ObIndexMergeNode *child = NULL;
@@ -3476,23 +3493,30 @@ int ObJoinOrder::generate_candi_index_merge_node(const uint64_t ref_table_id,
         if (T_OP_OR == filter->get_expr_type()) {
           is_valid_node = false;
           break;
+        } else {
+          continue;
         }
       } else if (OB_ISNULL(child)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("child node is null", K(ret), KPC(filter));
       } else if (OB_FAIL(candi_node->children_.push_back(child))) {
         LOG_WARN("failed to push back child node", K(ret));
-      } else if (T_OP_AND == filter->get_expr_type()) {
-        is_valid_node = true;
+      }
+    }
+    if (OB_SUCC(ret) && is_valid_node) {
+      if (T_OP_AND == filter->get_expr_type() && candi_node->children_.empty()) {
+        is_valid_node = false;
       }
     }
   } else {
     ObSEArray<uint64_t, 1> candicate_index_tids;
+    ObItemType expr_type = filter->get_expr_type();
     if (!get_tables().equal(filter->get_relation_ids())) {
       is_valid_node = false;
     } else if (!(filter->has_flag(IS_SIMPLE_COND)
                  || filter->has_flag(IS_RANGE_COND)
-                 || filter->has_flag(CNT_MATCH_EXPR))) {
+                 || filter->has_flag(CNT_MATCH_EXPR)
+                 || expr_type == T_OP_LT)) {
       is_valid_node = false;
     } else if (OB_FAIL(collect_candicate_indexes(ref_table_id,
                                                  filter,
@@ -3675,17 +3699,27 @@ int ObJoinOrder::check_one_candi_node_match_hint(ObIndexMergeNode *candi_node,
         break;
       }
       case INDEX_MERGE_INTERSECT: {
-        for (int64_t i = 0; OB_SUCC(ret) && !is_match_hint && i < candi_node->children_.count(); ++i) {
+        ObSEArray<ObIndexMergeNode*, 4> valid_children;
+        bool has_child_match = false;
+        for (int64_t i = 0; OB_SUCC(ret) && i < candi_node->children_.count(); ++i) {
           int64_t sub_idx = idx;
-          if (OB_FAIL(SMART_CALL(check_one_candi_node_match_hint(candi_node->children_.at(i), index_ids, sub_idx, is_match_hint)))) {
+          bool child_matches = false;
+          if (OB_FAIL(SMART_CALL(check_one_candi_node_match_hint(candi_node->children_.at(i), index_ids, sub_idx, child_matches)))) {
             LOG_WARN("failed to check candi tree match hint", K(ret), K(i), KPC(candi_node->children_.at(i)));
-          } else if (is_match_hint) {
-            ObIndexMergeNode *tmp_node = candi_node->children_.at(i);
-            candi_node->children_.reuse();
-            idx = sub_idx;
-            if (OB_FAIL(candi_node->children_.push_back(tmp_node))) {
-              LOG_WARN("failed to push back child node", K(ret));
+          } else if (child_matches) {
+            if (OB_FAIL(valid_children.push_back(candi_node->children_.at(i)))) {
+              LOG_WARN("failed to push back child", K(ret));
             }
+            idx = sub_idx;
+            has_child_match = true;
+          }
+        }
+        if (OB_SUCC(ret) && has_child_match) {
+          is_match_hint = true;
+          // 只有当至少有一个匹配时，才重写 children
+          // 这样就实现了“只保留 Hint 中指定的索引，过滤掉未指定的”
+          if (OB_FAIL(candi_node->children_.assign(valid_children))) {
+            LOG_WARN("failed to assign valid children", K(ret));
           }
         }
         break;
@@ -3867,7 +3901,11 @@ int ObJoinOrder::choose_best_selectivity_branch(ObIndexMergeNode* &candi_node)
       }
     }
     if (OB_SUCC(ret)) {
-      candi_node = best_child;
+      if (candi_node->children_.count() <= 1) {
+        candi_node = best_child;
+      } else {
+        LOG_TRACE("Keep Index Merge INTERSECT node", K(candi_node->children_.count()));
+      }
     }
   }
   return ret;
@@ -3895,6 +3933,19 @@ int ObJoinOrder::calc_selectivity_for_index_merge_node(ObIndexMergeNode* node,
           }
         }
         child_selectivity = 1.0 - get_plan()->get_selectivity_ctx().get_correlation_model().combine_filters_selectivity(selectivities);
+        break;
+      }
+      case INDEX_MERGE_INTERSECT: {
+        double current_sel = 1.0;
+        for (int64_t i = 0; OB_SUCC(ret) && i < node->children_.count(); ++i) {
+          double sub_sel = 1.0;
+          if (OB_FAIL(SMART_CALL(calc_selectivity_for_index_merge_node(node->children_.at(i), sub_sel)))) {
+            LOG_WARN("failed to calc child selectivity", K(ret));
+          } else {
+            current_sel *= sub_sel;
+          }
+        }
+        child_selectivity = current_sel;
         break;
       }
       case INDEX_MERGE_SCAN:
@@ -4019,14 +4070,60 @@ int ObJoinOrder::create_one_index_merge_path(const uint64_t table_id,
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("failed to new a index merge path", K(ret));
   } else if (OB_FALSE_IT(index_merge_path = new(index_merge_path) IndexMergePath(table_id, ref_table_id, this))) {
-  } else if (OB_FALSE_IT(index_merge_path->root_ = root_node)) {
+  } else {
+    if (stmt->has_limit()) {
+      ObRawExpr *limit_expr = stmt->get_limit_expr();
+      if (OB_NOT_NULL(limit_expr)) {
+        int64_t limit_val = -1;
+        if (limit_expr->is_const_expr() && (limit_expr->get_expr_type() == T_INT || limit_expr->get_expr_type() == T_UINT64)) {
+          const ObConstRawExpr *c_expr = static_cast<const ObConstRawExpr*>(limit_expr);
+          c_expr->get_value().get_int(limit_val);
+        } else if (limit_expr->get_expr_type() == T_QUESTIONMARK) {
+          const ObConstRawExpr *c_expr = static_cast<const ObConstRawExpr*>(limit_expr);
+          int64_t param_idx = -1;
+          if (OB_SUCC(c_expr->get_value().get_unknown(param_idx))) {
+            const ParamStore *params_ptr = get_plan()->get_optimizer_context().get_params();                 
+            if (OB_NOT_NULL(params_ptr)) {
+              const ParamStore &params = *params_ptr; 
+              if (param_idx >= 0 && param_idx < params.count()) {
+                const ObObjParam &param = params.at(param_idx);
+                // 尝试获取整数值
+                if (param.is_int() || param.is_uint64()) {
+                  param.get_int(limit_val);
+                }
+              }
+            }
+          }
+        }
+        if (limit_val > 0) {
+          index_merge_path->pushdown_limit_ = limit_val;
+        }
+      }
+    }
+  }
+  if (OB_FALSE_IT(index_merge_path->root_ = root_node)) {
   } else if (OB_FAIL(stmt->get_match_expr_on_table(table_id, all_match_exprs))) {
     LOG_WARN("failed to get all match exprs", K(ret), K(table_id));
-  } else if (OB_FAIL(index_merge_path->est_cost_info_.table_filters_.assign(helper.filters_))) {
-    LOG_WARN("failed to assign filters", K(ret));
-  } else if (OB_FAIL(index_merge_path->filter_.assign(helper.filters_))) {
-    LOG_WARN("failed to assign filters", K(ret));
-  } else if (OB_FAIL(index_merge_path->subquery_exprs_.assign(helper.subquery_exprs_))) {
+  } else {
+    ObSEArray<ObRawExpr*, 4> clean_filters;
+    for (int64_t i = 0; i < helper.filters_.count(); ++i) {
+      ObRawExpr *expr = helper.filters_.at(i);
+      if (expr->get_expr_type() == T_OP_IN) {
+        continue; 
+      }
+      if (!expr->has_flag(CNT_MATCH_EXPR) && expr->get_expr_type() != T_OP_BOOL) {
+        // 存入 Path，留给 CG 阶段注入 FTS
+        index_merge_path->fts_pushed_filters_.push_back(expr);
+      }
+      clean_filters.push_back(expr);
+    }
+    if (OB_FAIL(index_merge_path->est_cost_info_.table_filters_.assign(clean_filters))) {
+      LOG_WARN("failed to assign table filters", K(ret));
+    } else if (OB_FAIL(index_merge_path->filter_.assign(clean_filters))) {
+      LOG_WARN("failed to assign path filters", K(ret));
+    }
+  } 
+  if (OB_FAIL(index_merge_path->subquery_exprs_.assign(helper.subquery_exprs_))) {
     LOG_WARN("failed to assign subquery exprs", K(ret));
   } else if (OB_FAIL(get_plan()->get_rowkey_exprs(table_id, ref_table_id, rowkey_exprs))) {
     LOG_WARN("failed to get rowkey exprs", K(ret));
@@ -7807,13 +7904,6 @@ int AccessPath::estimate_cost()
       OPT_TRACE_COST_MODEL(KV_(cost), "=", KV(storage_est_cost), "* (1-", KV(rate), ") +", KV(stats_est_cost), "*", KV(rate));
       est_cost_info_.phy_query_range_row_count_ = opt_phy_query_range_row_count;
       est_cost_info_.logical_query_range_row_count_ = opt_logical_query_range_row_count;
-    }
-    if (est_cost_info_.index_meta_info_.is_fulltext_index_) {
-      double original_cost = cost_;
-      cost_ = cost_ / 10.0; 
-      LOG_TRACE("OPT: [HACK] Force reduce fulltext index cost", 
-                K(index_id_), K(original_cost), K(cost_));
-      OPT_TRACE_COST_MODEL("HACK: fulltext cost force reduced from ", original_cost, " to ", cost_);
     }
     DISABLE_OPT_TRACE_COST_MODEL;
   }
@@ -20063,39 +20153,8 @@ int ObJoinOrder::estimate_fts_index_scan(uint64_t table_id,
         LOG_WARN("failed to estimate table range rowcount", K(ret));
       } else {
         query_range_row_count = table_meta_range.table_row_count_;
-        double doc_id_sel = 1.0;
-        if (!doc_id_filters.empty()) {
-          if (OB_FAIL(ObOptSelectivity::calculate_selectivity(
-                  get_plan()->get_basic_table_metas(),
-                  get_plan()->get_selectivity_ctx(),
-                  doc_id_filters,
-                  doc_id_sel,
-                  get_plan()->get_predicate_selectivities()))) {
-            LOG_WARN("failed to calculate filter selectivity", K(ret));
-            ret = OB_SUCCESS;
-          }
-        }
-        double scalar_sel = 1.0;
-        if (!scalar_filters.empty()) {
-          if (OB_FAIL(ObOptSelectivity::calculate_selectivity(
-                      get_plan()->get_basic_table_metas(),
-                      get_plan()->get_selectivity_ctx(),
-                      scalar_filters,
-                      scalar_sel,
-                      get_plan()->get_predicate_selectivities()))) {
-            LOG_WARN("failed to calculate scalar filter selectivity", K(ret));
-            ret = OB_SUCCESS;
-          }
-        }
-        double combined_sel = doc_id_sel * scalar_sel;
-        double reduced_rows = static_cast<double>(query_range_row_count) * combined_sel;
-        if (get_plan()->get_stmt()->has_top_limit() && scalar_sel < 0.5) {
-          double bmw_heuristic_rows = 1.0; 
-          reduced_rows = std::min(reduced_rows, bmw_heuristic_rows);
-        }
-        query_range_row_count = static_cast<int64_t>(std::max(1.0, reduced_rows));
-        double total_rows = get_table_meta().table_row_count_;
-        selectivity = static_cast<double>(query_range_row_count) / total_rows;
+        selectivity = get_table_meta().table_row_count_ == 0 ? 0 :
+                      table_meta_range.table_row_count_ * 1.0 / get_table_meta().table_row_count_;
         // refine selectivity
         selectivity = std::min(selectivity, 1.0);
       }

@@ -7,7 +7,7 @@ kill -9 $OB_PID
 
 echo ""
 echo "=== 2. 开始 debug 构建 ==="
-bash build.sh debug -DOB_USE_CCACHE=ON --init --make -j3
+bash build.sh debug -DOB_USE_CCACHE=ON --init --make -j8
 
 echo ""
 echo "=== 3. 拷贝 observer 到 ~/seekdb/bin（自动覆盖） ==="

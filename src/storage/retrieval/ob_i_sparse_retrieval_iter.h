@@ -93,6 +93,8 @@ public :
   virtual int advance_shallow(const ObDatum &id_datum, const bool inclusive) = 0;
   virtual int get_curr_block_max_info(const ObMaxScoreTuple *&max_score_tuple) = 0;
   virtual bool in_shallow_status() const = 0;
+  virtual int64_t get_term_hash() const = 0;
+  virtual int64_t get_current_block_id() const = 0;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObISRDimBlockMaxIter);
 };
@@ -114,7 +116,9 @@ struct ObSparseRetrievalMergeParam
       scalar_candidates_(nullptr),
       enable_scalar_filter_(false),
       id_lower_bound_(0),
-      id_upper_bound_(-1)
+      id_upper_bound_(-1),
+      tablet_id_(),
+      table_id_()
   {}
   ~ObSparseRetrievalMergeParam() {}
   bool need_project_relevance() const { return relevance_proj_expr_ != nullptr; }
@@ -142,6 +146,8 @@ struct ObSparseRetrievalMergeParam
   // Simple ID range filter (for primary key id filtering)
   int64_t id_lower_bound_;  // 0 means no lower bound
   int64_t id_upper_bound_;  // -1 means no upper bound
+  common::ObTabletID tablet_id_;
+  common::ObTableID table_id_;
 };
 
 class ObISparseRetrievalMergeIter
